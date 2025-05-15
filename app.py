@@ -65,43 +65,111 @@ except Exception as e:
     st.stop()
 
 try:
-    if QDRANT_HOST.startswith("http"):
-        qdrant_params = {"url": QDRANT_HOST}
-    else:
-        qdrant_params = {"host": QDRANT_HOST, "port": QDRANT_PORT}
-    
-    if QDRANT_API_KEY:
-        qdrant_params["api_key"] = QDRANT_API_KEY
-        if not QDRANT_HOST.startswith("http") and QDRANT_HOST != "localhost":
-            qdrant_params["https"] = True  # Changed from https_ to https
+    if not QDRANT_API_KEY:
+        st.error("QDRANT_API_KEY not found. Please set it in your .env file or environment variables.")
+        logger.error("QDRANT_API_KEY not found in environment variables")
+        st.stop()
 
-    qdrant = QdrantClient(**qdrant_params)
-    qdrant.get_collections() # Test connection
-    logger.info(f"Connected to Qdrant: {QDRANT_HOST}:{QDRANT_PORT}")
+    qdrant = QdrantClient(
+        url=f"https://{QDRANT_HOST}:6333",
+        api_key=QDRANT_API_KEY
+    )
+    
+    # Test connection by getting collections
+    collections = qdrant.get_collections()
+    logger.info(f"Successfully connected to Qdrant. Available collections: {collections}")
+    
 except Exception as e:
-    st.error(f"Qdrant connection error at {QDRANT_HOST}:{QDRANT_PORT}. Details: {e}")
+    st.error(f"Qdrant connection error: {e}")
     logger.error(f"Qdrant connection error: {e}")
     st.stop()
-# Ensure collection exists
+
+
+# Ensure collection exists and has the necessary index
 try:
     collection_info = qdrant.get_collection(collection_name=COLLECTION_NAME)
+    # Check vector config
     if collection_info.config.params.vectors.size != EMBEDDING_DIM or \
        collection_info.config.params.vectors.distance != models.Distance.COSINE:
-        logger.warning(f"Collection '{COLLECTION_NAME}' exists with different configuration. Recreating.")
+        logger.warning(f"Collection '{COLLECTION_NAME}' vector config differs. Recreating.")
         qdrant.recreate_collection(
             collection_name=COLLECTION_NAME,
             vectors_config=models.VectorParams(size=EMBEDDING_DIM, distance=models.Distance.COSINE)
         )
         logger.info(f"Recreated Qdrant collection: {COLLECTION_NAME}")
-except Exception: # Covers collection not found and other Qdrant client errors
-    logger.info(f"Collection '{COLLECTION_NAME}' not found or error accessing. Creating/Recreating.")
-    qdrant.recreate_collection(
+        # After recreating, the index will be gone, so we need to create it again
+        qdrant.create_payload_index(
+            collection_name=COLLECTION_NAME,
+            field_name="transcript_name",
+            field_schema=models.PayloadSchemaType.KEYWORD # or models.TextIndexParams for text search
+        )
+        logger.info(f"Created payload index on 'transcript_name' for collection '{COLLECTION_NAME}'.")
+
+    else:
+        # Collection exists with correct vector config, now check for payload index
+        # This is a bit trickier as get_collection doesn't directly list payload indexes easily in older versions.
+        # A simpler approach for now is to try creating it. If it exists, Qdrant might ignore or error,
+        # but it's safer to ensure it's there.
+        # For newer qdrant_client versions, you might inspect collection_info.config.payload_storage_type or similar.
+        # Let's try to create it. If it already exists with the same params, it's often a no-op or harmless.
+        # However, to be absolutely sure and avoid potential errors if it exists with different params,
+        # you might need a more complex check or handle potential "already exists" errors from create_payload_index.
+        # For simplicity in a starter script, we can attempt creation.
+        try:
+            # Check existing indexes by examining the collection info's payload schema if available,
+            # or just attempt to create.
+            # A more robust way would be to list indexes if the client version supports it easily,
+            # or catch the specific error Qdrant throws if an incompatible index exists.
+            
+            # For now, let's assume we want to ensure it exists.
+            # If you frequently change index types, you might need to delete and recreate.
+            # A common pattern is to check collection_info for existing indexes.
+            # The simplest idempotent way is to just call create_payload_index.
+            # If it fails because an index of a *different type* exists, that's a separate issue to resolve manually.
+            
+            # Check if the index is already part of the collection info (newer client versions might show this)
+            # This part is pseudo-code as exact structure of collection_info for indexes can vary.
+            # A more direct way:
+            current_indexes = qdrant.get_collection(collection_name=COLLECTION_NAME).payload_schema
+            if "transcript_name" not in current_indexes or \
+               current_indexes.get("transcript_name") != models.PayloadSchemaType.KEYWORD: # Or however the type is represented
+                logger.info(f"Payload index on 'transcript_name' not found or not KEYWORD. Creating/Updating.")
+                qdrant.create_payload_index(
+                    collection_name=COLLECTION_NAME,
+                    field_name="transcript_name",
+                    field_schema=models.PayloadSchemaType.KEYWORD
+                )
+                logger.info(f"Ensured payload index on 'transcript_name' (KEYWORD) exists for '{COLLECTION_NAME}'.")
+            else:
+                logger.info(f"Payload index on 'transcript_name' (KEYWORD) already exists for '{COLLECTION_NAME}'.")
+
+        except Exception as e_index:
+            logger.warning(f"Could not definitively create/verify payload index on 'transcript_name' (may already exist or other issue): {e_index}")
+            # It might be okay if it already exists and Qdrant handles the create call gracefully.
+
+
+except Exception as e_col: # Covers collection not found and other Qdrant client errors during get_collection
+    logger.info(f"Collection '{COLLECTION_NAME}' not found or error accessing: {e_col}. Creating collection and index.")
+    qdrant.recreate_collection( # recreate_collection also handles creation if it does not exist
         collection_name=COLLECTION_NAME,
         vectors_config=models.VectorParams(size=EMBEDDING_DIM, distance=models.Distance.COSINE)
     )
-    logger.info(f"Ensured Qdrant collection '{COLLECTION_NAME}' exists with correct config.")
-
-
+    logger.info(f"Created/Recreated Qdrant collection: {COLLECTION_NAME}")
+    # Create the index after collection creation
+    qdrant.create_payload_index(
+        collection_name=COLLECTION_NAME,
+        field_name="transcript_name",
+        field_schema=models.PayloadSchemaType.KEYWORD # For exact matches
+        # Alternatively, for more complex text matching on this field (not just exact value):
+        # field_schema=models.TextIndexParams(
+        # type="text",
+        # tokenizer=models.TokenizerType.WORD,
+        # min_token_len=2,
+        # max_token_len=15,
+        # lowercase=True
+        # )
+    )
+    logger.info(f"Created payload index on 'transcript_name' for new collection '{COLLECTION_NAME}'.")
 # === HELPERS ===
 def parse_srt_file(file_path: str) -> list:
     try:
