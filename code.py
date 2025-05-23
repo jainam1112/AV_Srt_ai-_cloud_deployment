@@ -3,6 +3,8 @@ import json
 import os # For environment variables
 from qdrant_client import QdrantClient, models # Import Qdrant client
 from dotenv import load_dotenv # To load .env for Qdrant connection details
+import re # Added for parsing reranked indices
+from openai import OpenAIError # Added for OpenAI error handling
 
 # --- Qdrant Configuration (Same as your main app, but for this annotator) ---
 load_dotenv() # Load .env file if present for local development
@@ -11,6 +13,9 @@ QDRANT_HOST = os.getenv("QDRANT_HOST_ANNOTATOR", os.getenv("QDRANT_HOST", "local
 QDRANT_PORT = int(os.getenv("QDRANT_PORT_ANNOTATOR", os.getenv("QDRANT_PORT", 6333)))
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY_ANNOTATOR", os.getenv("QDRANT_API_KEY"))
 COLLECTION_NAME = os.getenv("COLLECTION_NAME_ANNOTATOR", os.getenv("COLLECTION_NAME", "gurudev_satsangs"))
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small") # Ensure this is defined
+RERANK_MODEL = os.getenv("RERANK_MODEL", "gpt-4-turbo-preview") # Added
+ANSWER_EXTRACTION_MODEL = os.getenv("ANSWER_EXTRACTION_MODEL", "gpt-3.5-turbo") # Added
 
 qdrant_client = None
 qdrant_error = None
@@ -113,14 +118,29 @@ if qdrant_client and not qdrant_error:
         st.session_state.current_annotations = {key: "" for key in ALL_BIOGRAPHICAL_CATEGORY_KEYS}
 
 
-    # Fetch and display chunks for selection
-    # This part runs whenever the page loads or relevant session state changes
-    scroll_filter_qdrant = None
+# Fetch and display chunks for selection
+# This part runs whenever the page loads or relevant session state changes
+
+    # Build Qdrant filter conditions
+    all_must_conditions = []
+    all_must_not_conditions = []
+
+    # Transcript name filter
     if transcript_filter_name and transcript_filter_name != "All Transcripts":
-        scroll_filter_qdrant = models.Filter(
-            must=[models.FieldCondition(key="transcript_name", match=models.MatchValue(value=transcript_filter_name))]
+        all_must_conditions.append(
+            models.FieldCondition(key="transcript_name", match=models.MatchValue(value=transcript_filter_name))
         )
+
+    scroll_filter_qdrant = None
+    filter_args = {}
+    if all_must_conditions:
+        filter_args["must"] = all_must_conditions
+    if all_must_not_conditions:
+        filter_args["must_not"] = all_must_not_conditions
     
+    if filter_args:
+        scroll_filter_qdrant = models.Filter(**filter_args)
+
     points_to_display = []
     if qdrant_client: # Re-check if client is available
         try:
@@ -192,6 +212,213 @@ elif qdrant_error:
     st.sidebar.error(qdrant_error)
 else:
     st.sidebar.warning("Qdrant client not initialized. Cannot load chunks.")
+
+# --- Semantic Search & Analysis UI (Moved to Sidebar) ---
+st.sidebar.markdown("---")
+st.sidebar.header("🔍 Semantic Search & Analysis")
+
+# Ensure OpenAI client is available for search, rerank, and answer extraction
+if 'openai_client_annotator' not in st.session_state:
+    openai_api_key_annotator = os.getenv("OPENAI_API_KEY_ANNOTATOR", os.getenv("OPENAI_API_KEY"))
+    if openai_api_key_annotator:
+        from openai import OpenAI as OpenAIClientForAnnotator # Ensure client is imported
+        st.session_state.openai_client_annotator = OpenAIClientForAnnotator(api_key=openai_api_key_annotator)
+    else:
+        st.sidebar.warning("OpenAI API Key not found. Semantic search and LLM features will be unavailable.")
+
+# Placeholder for extract_answer_span function (as definition was not provided)
+def extract_answer_span(query: str, context: str, model: str) -> str:
+    """
+    Placeholder function to extract an answer span using an LLM.
+    Replace with your actual implementation.
+    """
+    # This is a dummy implementation.
+    # In a real scenario, you would make an API call to an LLM.
+    # For example, using st.session_state.openai_client_annotator.chat.completions.create(...)
+    print(f"Placeholder: Called extract_answer_span for query '{query}' with model '{model}'")
+    if query.lower() in context.lower():
+        # A very naive "extraction"
+        start_index = context.lower().find(query.lower())
+        end_index = start_index + len(query)
+        return context[start_index:end_index]
+    return f"Could not extract specific span for '{query}' from context (placeholder response)."
+
+
+if 'openai_client_annotator' in st.session_state and st.session_state.openai_client_annotator and qdrant_client:
+    search_query_input = st.sidebar.text_input("Enter your search query:", key="main_search_query_input")
+
+    # Search Options Columns
+    # For sidebar, columns might not be ideal, stacking them:
+    use_llm_reranking = st.sidebar.checkbox("Enable LLM Reranking", value=True, key="rerank_toggle_checkbox_sidebar",
+                                     help=f"Uses {RERANK_MODEL} to reorder results.")
+    do_pinpoint_answer_extraction = st.sidebar.checkbox("Pinpoint Answer Snippet", value=True, key="pinpoint_answer_checkbox_sidebar",
+                                              help=f"Uses {ANSWER_EXTRACTION_MODEL} to identify relevant parts.")
+    initial_search_results_limit = st.sidebar.slider("Initial results to retrieve:", min_value=3, max_value=30, value=5, key="search_results_limit_sidebar_slider",
+                                              help="Number of chunks from Qdrant before reranking/pinpointing.")
+
+    custom_reranking_instructions_input = ""
+    if use_llm_reranking:
+        custom_reranking_instructions_input = st.sidebar.text_area(
+            "Custom Reranking Instructions (Optional):",
+            placeholder="e.g., 'Prioritize practical advice.'",
+            key="custom_rerank_instructions_input_area_sidebar",
+            height=100
+        )
+
+    # --- Search and Display Results (in Sidebar) ---
+    if search_query_input:
+        with st.spinner("Searching and analyzing results..."): # Changed from st.sidebar.spinner
+            # 1. Get Query Embedding
+            try:
+                query_embedding_response = st.session_state.openai_client_annotator.embeddings.create(model=EMBEDDING_MODEL, input=[search_query_input])
+                query_vector_for_search = query_embedding_response.data[0].embedding
+            except OpenAIError as e:
+                st.sidebar.error(f"Failed to get embedding: {e}")
+                # st.stop() # Consider removing st.stop() if it's too disruptive in sidebar
+                query_vector_for_search = None
+            except Exception as e:
+                st.sidebar.error(f"Unexpected error preparing query: {e}")
+                # st.stop()
+                query_vector_for_search = None
+
+            if query_vector_for_search:
+                # 2. Search Qdrant
+                try:
+                    print(f"Sidebar: Searching Qdrant for query: '{search_query_input}' with limit {initial_search_results_limit}")
+                    qdrant_search_hits = qdrant_client.search(
+                        collection_name=COLLECTION_NAME,
+                        query_vector=query_vector_for_search,
+                        limit=initial_search_results_limit,
+                        with_payload=True
+                    )
+                except Exception as e:
+                    st.sidebar.error(f"Error searching Qdrant: {e}")
+                    # st.stop()
+                    qdrant_search_hits = []
+                
+                retrieved_results_payloads = [hit.payload for hit in qdrant_search_hits if hit.payload]
+
+                if not retrieved_results_payloads:
+                    st.sidebar.info("No results found for your query.")
+                    # st.stop()
+
+                # 3. Optional LLM Reranking
+                if use_llm_reranking and len(retrieved_results_payloads) > 1:
+                    with st.spinner(f"Reranking with {RERANK_MODEL}..."): # Changed from st.sidebar.spinner
+                        print(f"Sidebar: Attempting to rerank {len(retrieved_results_payloads)} results.")
+                        excerpts_for_llm_rerank = []
+                        for i, res_payload in enumerate(retrieved_results_payloads):
+                            excerpts_for_llm_rerank.append(f"[{i+1}] {res_payload.get('original_text', 'Error: Text not found')}")
+                        
+                        rerank_instruction_prefix = "Rerank text excerpts by relevance to the user's query."
+                        if custom_reranking_instructions_input:
+                            rerank_instruction_prefix += f" Criteria: {custom_reranking_instructions_input}."
+                        
+                        llm_rerank_prompt = (
+                            f"{rerank_instruction_prefix}\n\n"
+                            f"User's query: \"{search_query_input}\"\n\n"
+                            f"Excerpts (prefixed with index in brackets, e.g., [1]):\n"
+                            f"{chr(10).join(excerpts_for_llm_rerank)}\n\n"
+                            f"Return *only* a comma-separated list of original indices (e.g., '3,1,2'), "
+                            f"most relevant to least. No other text."
+                        )
+                        
+                        try:
+                            rerank_response = st.session_state.openai_client_annotator.chat.completions.create(
+                                model=RERANK_MODEL,
+                                messages=[
+                                    {"role": "system", "content": "You rerank search results based on queries and instructions."},
+                                    {"role": "user", "content": llm_rerank_prompt}
+                                ],
+                                max_tokens=200,
+                                temperature=0.0
+                            )
+                            reranked_indices_str_output = rerank_response.choices[0].message.content.strip()
+                            print(f"Sidebar: Reranker LLM output: '{reranked_indices_str_output}'")
+
+                            parsed_reranked_indices = []
+                            seen_indices_for_rerank = set()
+                            if reranked_indices_str_output:
+                                raw_indices_from_llm = re.findall(r'\d+', reranked_indices_str_output)
+                                for s_idx in raw_indices_from_llm:
+                                    try:
+                                        val = int(s_idx) - 1  # 0-based index
+                                        if 0 <= val < len(retrieved_results_payloads) and val not in seen_indices_for_rerank:
+                                            parsed_reranked_indices.append(val)
+                                            seen_indices_for_rerank.add(val)
+                                    except ValueError:
+                                        print(f"Sidebar: Reranker LLM non-integer index: '{s_idx}'")
+                            
+                            if len(parsed_reranked_indices) > 0:
+                                original_indices_set = set(range(len(retrieved_results_payloads)))
+                                missing_indices_after_rerank = sorted(list(original_indices_set - seen_indices_for_rerank))
+                                final_indices_order_after_rerank = parsed_reranked_indices + missing_indices_after_rerank
+                                
+                                retrieved_results_payloads = [retrieved_results_payloads[i] for i in final_indices_order_after_rerank if 0 <= i < len(retrieved_results_payloads)]
+                                st.sidebar.caption(f"ℹ️ Results reranked by {RERANK_MODEL}.")
+                            else:
+                                st.sidebar.warning("Reranking failed or no reordering. Using original order.", icon="⚠️")
+                                print("Sidebar: Reranking failed or no reordering.")
+
+                        except OpenAIError as e_rerank:
+                            st.sidebar.warning(f"LLM Reranking API error: {e_rerank}. Using original order.", icon="⚠️")
+                            print(f"Sidebar: OpenAI API error during reranking: {e_rerank}")
+                        except Exception as e_rerank_general:
+                            st.sidebar.warning(f"Error during reranking: {e_rerank_general}. Using original order.", icon="⚠️")
+                            print(f"Sidebar: Unexpected error during reranking: {e_rerank_general}")
+                
+                # 4. Display Results in Sidebar
+                st.sidebar.subheader(f"Search Results for: \"{search_query_input}\"")
+                if not retrieved_results_payloads:
+                    st.sidebar.info("No relevant information found.")
+                else:
+                    for i, result_payload_data in enumerate(retrieved_results_payloads, 1):
+                        if not isinstance(result_payload_data, dict):
+                            st.sidebar.error(f"Result {i} invalid payload.")
+                            print(f"Sidebar: Invalid payload for result {i}: {result_payload_data}")
+                            continue
+
+                        full_chunk_text_content = result_payload_data.get('original_text', 'Error: Text not found')
+                        
+                        expander_title = f"Result {i} @ {result_payload_data.get('timestamp', 'N/A')} | {result_payload_data.get('transcript_name', 'N/A')}"
+                        with st.sidebar.expander(expander_title, expanded=(i==1)):
+                            if do_pinpoint_answer_extraction and full_chunk_text_content != 'Error: Text not found':
+                                with st.spinner(f"Extracting answer for result {i}..."): # This was already correct
+                                    pinpointed_answer_span = extract_answer_span(search_query_input, full_chunk_text_content, ANSWER_EXTRACTION_MODEL)
+                                
+                                if pinpointed_answer_span and \
+                                   pinpointed_answer_span.strip() and \
+                                   pinpointed_answer_span.strip().lower() != full_chunk_text_content.strip().lower() and \
+                                   len(pinpointed_answer_span.strip()) < len(full_chunk_text_content.strip()):
+                                    st.markdown(f"🎯 **Pinpointed Snippet:**")
+                                    st.markdown(f"> *{pinpointed_answer_span.strip()}*")
+                                    st.markdown("--- \n**Full Context:**")
+                                elif pinpointed_answer_span and pinpointed_answer_span.strip().lower() == full_chunk_text_content.strip().lower():
+                                     st.caption(f"(Full chunk identified as most direct by {ANSWER_EXTRACTION_MODEL})")
+
+                            st.markdown(f"{full_chunk_text_content}")
+                            
+                            entities_data = result_payload_data.get('entities')
+                            if entities_data and isinstance(entities_data, dict):
+                                entity_parts = []
+                                if entities_data.get('people'): entity_parts.append(f"**People:** {', '.join(entities_data['people'])}")
+                                if entities_data.get('places'): entity_parts.append(f"**Places:** {', '.join(entities_data['places'])}")
+                                if 'self_references' in entities_data: entity_parts.append(f"**Self-ref:** {entities_data.get('self_references', 'N/A')}")
+                                if entity_parts:
+                                    st.markdown("---")
+                                    st.markdown(" ".join(entity_parts), unsafe_allow_html=True)
+                            
+                            # Add a button to load this chunk into the main annotation area
+                            if st.button(f"Load Chunk {i} for Annotation", key=f"sidebar_load_chunk_{result_payload_data.get('id', i)}"):
+                                st.session_state.transcript_chunk_input = full_chunk_text_content
+                                st.session_state.loaded_qdrant_chunk_id = result_payload_data.get('id', f"searched_result_{i}")
+                                st.session_state.loaded_qdrant_chunk_text = full_chunk_text_content
+                                st.session_state.current_annotations = {key: "" for key in ALL_BIOGRAPHICAL_CATEGORY_KEYS}
+                                st.rerun()
+elif not qdrant_client:
+    st.sidebar.warning("Qdrant client not available. Search disabled.")
+else: # OpenAI client not available
+    st.sidebar.warning("OpenAI client not available. Semantic search and LLM features disabled.")
 
 
 # --- Main Annotation Area (largely same as before) ---
