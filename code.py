@@ -83,7 +83,7 @@ if qdrant_client and not qdrant_error:
                 for point in points:
                     if point.payload and 'transcript_name' in point.payload:
                         names.add(point.payload['transcript_name'])
-                if not next_offset or not points or len(names) > 500: break
+                if not next_offset or not points or len(names) > 500: break # Stop if no more points or enough names
                 offset = next_offset
             return ["All Transcripts"] + sorted(list(names))
         except Exception as e:
@@ -111,6 +111,7 @@ if qdrant_client and not qdrant_error:
         st.session_state.transcript_chunk_input = "" # Clear manual input area
         # Clear previous annotations when loading new chunks
         st.session_state.current_annotations = {key: "" for key in ALL_BIOGRAPHICAL_CATEGORY_KEYS}
+        # Note: No st.rerun() here, data fetching happens below in the same script run
 
 
     # Fetch and display chunks for selection
@@ -163,7 +164,7 @@ if qdrant_client and not qdrant_error:
 
             if points_to_display:
                 st.sidebar.subheader("Select a Chunk to Annotate:")
-                for point in points_to_display:
+                for point_idx, point in enumerate(points_to_display): # Added enumerate for unique keys
                     # SearchResult has .id and .payload, PointStruct also has .id and .payload
                     chunk_id = point.id
                     payload = point.payload
@@ -172,15 +173,20 @@ if qdrant_client and not qdrant_error:
                         timestamp = payload.get('timestamp', 'N/A')
                         transcript_name_label = payload.get('transcript_name', 'Unknown')
                         
+                        # Using a more unique key including point_idx if chunk_id might not be unique enough across batches
+                        button_key = f"load_chunk_{chunk_id}_{point_idx}"
                         button_label = f"Load: {transcript_name_label} @ {timestamp} - \"{text_snippet}\""
-                        if st.sidebar.button(button_label, key=f"load_chunk_{chunk_id}"):
+                        if st.sidebar.button(button_label, key=button_key):
                             st.session_state.transcript_chunk_input = payload['original_text']
                             st.session_state.loaded_qdrant_chunk_id = chunk_id
                             st.session_state.loaded_qdrant_chunk_text = payload['original_text']
                             # Clear previous annotations when loading a new specific chunk
                             st.session_state.current_annotations = {key: "" for key in ALL_BIOGRAPHICAL_CATEGORY_KEYS}
                             st.rerun() # Rerun to update the main text area and annotation fields
-            elif st.session_state.get("load_qdrant_chunks_button_triggered"): # If button was pressed but no results
+            # This condition checks a session state key that might need specific management.
+            # If "load_qdrant_chunks_button_triggered" is meant to indicate the main "Load/Next Batch" button was pressed
+            # and resulted in no points, the logic for setting this key needs to be explicit.
+            elif st.session_state.get("load_qdrant_chunks_button_triggered"): 
                  st.sidebar.info("No more chunks found with current filters/search or end of collection reached.")
 
 
@@ -207,7 +213,9 @@ if st.session_state.loaded_qdrant_chunk_id:
         # disabled=True # Optionally make it non-editable if only annotating loaded chunks
     )
     # Ensure session state is updated if user somehow edits it (if not disabled)
-    st.session_state.transcript_chunk_input = transcript_chunk
+    if transcript_chunk != st.session_state.transcript_chunk_input: # Update if changed
+        st.session_state.transcript_chunk_input = transcript_chunk
+
 
 else:
     transcript_chunk = st.text_area(
@@ -216,7 +224,8 @@ else:
         height=250,
         key="transcript_chunk_input_area_manual"
     )
-    st.session_state.transcript_chunk_input = transcript_chunk
+    if transcript_chunk != st.session_state.transcript_chunk_input: # Update if changed
+        st.session_state.transcript_chunk_input = transcript_chunk
 
 
 st.header("2. Extract Verbatim Quotes for Each Category")
@@ -227,28 +236,32 @@ st.markdown("""
 - If no text fits, leave the box **empty**.
 """)
 
-annotation_inputs = {}
+annotation_inputs = {} # Not strictly needed if directly updating session state
 cols_per_row = 2
 category_columns = st.columns(cols_per_row)
 col_idx = 0
 for i, key in enumerate(ALL_BIOGRAPHICAL_CATEGORY_KEYS):
     with category_columns[col_idx]:
         display_label = f"{i+1}. {format_key_for_display(key)}"
-        annotation_inputs[key] = st.text_area(
+        # Directly update session_state in the text_area's on_change or rely on Streamlit's execution model
+        current_val = st.session_state.current_annotations.get(key, "")
+        new_val = st.text_area(
             display_label,
             height=100,
             key=f"category_{key}",
             placeholder=f"Quotes for {format_key_for_display(key)}...",
-            value=st.session_state.current_annotations.get(key, "") # Use .get for safety
+            value=current_val
         )
-        st.session_state.current_annotations[key] = annotation_inputs[key]
+        if new_val != current_val: # Update session state if value changed
+            st.session_state.current_annotations[key] = new_val
+            # No st.rerun() needed here, will update on next interaction or button press
     col_idx = (col_idx + 1) % cols_per_row
 
 st.header("3. Generate Fine-Tuning Example (JSONL Format)")
 if st.button("Generate JSONL Line", key="generate_button_main"):
     current_chunk_text_for_jsonl = st.session_state.transcript_chunk_input # Use current content of text area
     if not current_chunk_text_for_jsonl.strip():
-        st.warning("Please load or provide a transcript chunk.")
+        st.error("Cannot generate JSONL line. The current chunk text is empty.")
     else:
         assistant_json_data = {}
         for key, text_area_content in st.session_state.current_annotations.items(): # Use session state directly
@@ -256,7 +269,7 @@ if st.button("Generate JSONL Line", key="generate_button_main"):
                 quotes_list = [quote.strip() for quote in text_area_content.split('\n') if quote.strip()]
                 assistant_json_data[key] = quotes_list
             else:
-                assistant_json_data[key] = []
+                assistant_json_data[key] = [] # Ensure all keys are present, even if empty
 
         assistant_content_str = f"```json\n{json.dumps(assistant_json_data, indent=2)}\n```"
         user_message_content = f"Transcript Segment: \"{current_chunk_text_for_jsonl.strip()}\""
@@ -270,10 +283,10 @@ if st.button("Generate JSONL Line", key="generate_button_main"):
         st.code(json.dumps(jsonl_line_data), language="json")
         st.info("Copy and paste this line into your .jsonl training file.")
 
-        # Option to clear ONLY annotations for the current chunk, keeping the chunk text
-        if st.button("Clear Annotations (Keep Chunk Text)", key="clear_annotations_only_button"):
-            st.session_state.current_annotations = {key: "" for key in ALL_BIOGRAPHICAL_CATEGORY_KEYS}
-            st.rerun()
+# Option to clear ONLY annotations for the current chunk, keeping the chunk text
+if st.button("Clear Annotations (Keep Chunk Text)", key="clear_annotations_only_button"):
+    st.session_state.current_annotations = {key: "" for key in ALL_BIOGRAPHICAL_CATEGORY_KEYS}
+    st.rerun()
 
 st.markdown("---")
 st.markdown("Collect many diverse examples for effective fine-tuning!") # type: ignore
