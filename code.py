@@ -188,26 +188,41 @@ if qdrant_client and not qdrant_error:
                     # SearchResult has .id and .payload, PointStruct also has .id and .payload
                     chunk_id = point.id
                     payload = point.payload
-                    if payload and 'original_text' in payload:
+                    if payload and 'original_text' in payload: # This check is good
                         text_snippet = payload['original_text'][:100] + "..." # Show a snippet
                         timestamp = payload.get('timestamp', 'N/A')
                         transcript_name_label = payload.get('transcript_name', 'Unknown')
                         
-                        # Using a more unique key including point_idx if chunk_id might not be unique enough across batches
-                        button_key = f"load_chunk_{chunk_id}_{point_idx}"
-                        button_label = f"Load: {transcript_name_label} @ {timestamp} - \"{text_snippet}\""
-                        if st.sidebar.button(button_label, key=button_key):
-                            st.session_state.transcript_chunk_input = payload['original_text']
-                            st.session_state.loaded_qdrant_chunk_id = chunk_id
-                            st.session_state.loaded_qdrant_chunk_text = payload['original_text']
-                            # Clear previous annotations when loading a new specific chunk
-                            st.session_state.current_annotations = {key: "" for key in ALL_BIOGRAPHICAL_CATEGORY_KEYS}
-                            st.rerun() # Rerun to update the main text area and annotation fields
-            # This condition checks a session state key that might need specific management.
-            # If "load_qdrant_chunks_button_triggered" is meant to indicate the main "Load/Next Batch" button was pressed
-            # and resulted in no points, the logic for setting this key needs to be explicit.
+                        expander_label = f"{transcript_name_label} @ {timestamp} - \"{text_snippet}\""
+                        
+                        with st.sidebar.expander(expander_label, expanded=(point_idx == 0)):
+                            st.caption("Full Text Preview:")
+                            # Displaying a bit more text, or you can show the full payload['original_text']
+                            st.markdown(f"```\n{payload['original_text'][:500]}...\n```" if len(payload['original_text']) > 500 else f"```\n{payload['original_text']}\n```")
+
+                            button_key = f"qcl_add_to_annotate_{chunk_id}_{point_idx}" # Unique key for this button
+                            if st.button("Add to Annotate", key=button_key): # Button inside the expander
+                                # Debug: Log what's being loaded
+                                st.session_state.debug_message = f"Sidebar QCL 'Add to Annotate' button '{button_key}' clicked. Attempting to load chunk ID: {chunk_id}."
+                                
+                                loaded_text = payload.get('original_text') # Get the text
+                                if loaded_text is None: # Ensure it's a string, even if original_text was None
+                                    loaded_text = ""
+                                    st.session_state.debug_message += " Original text was None, set to empty string."
+                                else:
+                                    st.session_state.debug_message += f" Original text length: {len(loaded_text)}."
+
+                                st.session_state.transcript_chunk_input = loaded_text
+                                st.session_state.loaded_qdrant_chunk_id = chunk_id
+                                st.session_state.loaded_qdrant_chunk_text = loaded_text # Keep this consistent
+                                
+                                # Clear previous annotations when loading a new specific chunk
+                                st.session_state.current_annotations = {key: "" for key in ALL_BIOGRAPHICAL_CATEGORY_KEYS}
+                                st.rerun() # Rerun to update the main text area and annotation fields
+            
             elif st.session_state.get("load_qdrant_chunks_button_triggered"): 
                  st.sidebar.info("No more chunks found with current filters/search or end of collection reached.")
+                 st.session_state.load_qdrant_chunks_button_triggered = False # Reset trigger
 
 
         except Exception as e:
@@ -429,6 +444,17 @@ else: # OpenAI client not available
 
 # --- Main Annotation Area (largely same as before) ---
 st.header("1. Transcript Chunk for Annotation")
+
+# Display debug message if any
+if st.session_state.get("debug_message"):
+    st.info(f"Debug: {st.session_state.debug_message}")
+    del st.session_state.debug_message # Clear after displaying
+
+# More debug output for main area
+st.write(f"Main Area - `loaded_qdrant_chunk_id`: `{st.session_state.get('loaded_qdrant_chunk_id')}`")
+st.write(f"Main Area - `transcript_chunk_input` (first 50 chars): `{str(st.session_state.get('transcript_chunk_input', ''))[:50]}`")
+
+
 if st.session_state.loaded_qdrant_chunk_id:
     st.info(f"Loaded chunk ID from Qdrant: {st.session_state.loaded_qdrant_chunk_id}")
     # Display the loaded text but allow edits if needed, or make it read-only
