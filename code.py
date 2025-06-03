@@ -197,20 +197,24 @@ if qdrant_client and not qdrant_error:
                         
                         with st.sidebar.expander(expander_label, expanded=(point_idx == 0)):
                             st.caption("Full Text Preview:")
-                            # Displaying a bit more text, or you can show the full payload['original_text']
-                            st.markdown(f"```\n{payload['original_text'][:500]}...\n```" if len(payload['original_text']) > 500 else f"```\n{payload['original_text']}\n```")
+                            # Displaying the full payload['original_text']
+                            st.markdown(f"```\n{payload['original_text']}\n```")
 
                             button_key = f"qcl_add_to_annotate_{chunk_id}_{point_idx}" # Unique key for this button
                             if st.button("Add to Annotate", key=button_key): # Button inside the expander
-                                # Debug: Log what's being loaded
-                                st.session_state.debug_message = f"Sidebar QCL 'Add to Annotate' button '{button_key}' clicked. Attempting to load chunk ID: {chunk_id}."
-                                
+                                # --- Button Click Debugging ---
+                                print(f"--- QCL DEBUG: 'Add to Annotate' button clicked for chunk_id: {chunk_id} ---") # Terminal debug
+                                st.session_state.qcl_debug_button_click = f"QCL 'Add to Annotate' CLICKED for chunk {chunk_id}. Original text snippet: '{payload.get('original_text', 'N/A')[:30]}...'"
+                                # --- End Button Click Debugging ---
+
                                 loaded_text = payload.get('original_text') # Get the text
                                 if loaded_text is None: # Ensure it's a string, even if original_text was None
                                     loaded_text = ""
-                                    st.session_state.debug_message += " Original text was None, set to empty string."
-                                else:
-                                    st.session_state.debug_message += f" Original text length: {len(loaded_text)}."
+                                    # Simple debug message (can be part of the main debug message if needed)
+                                    # st.session_state.debug_message = f"Button for chunk {chunk_id} clicked. Original text was None."
+                                # else:
+                                    # Simple debug message
+                                    # st.session_state.debug_message = f"Button for chunk {chunk_id} clicked. Text length: {len(loaded_text)}. Starting with: '{loaded_text[:30]}...'"
 
                                 st.session_state.transcript_chunk_input = loaded_text
                                 st.session_state.loaded_qdrant_chunk_id = chunk_id
@@ -218,10 +222,11 @@ if qdrant_client and not qdrant_error:
                                 
                                 # Clear previous annotations when loading a new specific chunk
                                 st.session_state.current_annotations = {key: "" for key in ALL_BIOGRAPHICAL_CATEGORY_KEYS}
+                                # st.session_state.debug_message += f" | Set loaded_qdrant_chunk_id to {chunk_id}. transcript_chunk_input (start): '{loaded_text[:20]}...'. Rerunning." # Simplified above
                                 st.rerun() # Rerun to update the main text area and annotation fields
             
-            elif st.session_state.get("load_qdrant_chunks_button_triggered"): 
-                 st.sidebar.info("No more chunks found with current filters/search or end of collection reached.")
+            elif not points_to_display and st.session_state.get("load_qdrant_chunks_button_triggered"): # Check if button was pressed AND no points
+                 st.sidebar.info("No chunks found with current filters/search or end of collection reached.")
                  st.session_state.load_qdrant_chunks_button_triggered = False # Reset trigger
 
 
@@ -445,24 +450,34 @@ else: # OpenAI client not available
 # --- Main Annotation Area (largely same as before) ---
 st.header("1. Transcript Chunk for Annotation")
 
-# Display debug message if any
-if st.session_state.get("debug_message"):
+# Display debug message from QCL button if any
+if "qcl_debug_button_click" in st.session_state:
+    st.error(f"DEBUG FROM QCL BUTTON CLICK: {st.session_state.qcl_debug_button_click}") # Use st.error to make it stand out
+    del st.session_state.qcl_debug_button_click # Clear after displaying
+
+# Display general debug message if any (you might have this from other parts)
+if "debug_message" in st.session_state: 
     st.info(f"Debug: {st.session_state.debug_message}")
-    del st.session_state.debug_message # Clear after displaying
+    del st.session_state.debug_message 
 
 # More debug output for main area
-st.write(f"Main Area - `loaded_qdrant_chunk_id`: `{st.session_state.get('loaded_qdrant_chunk_id')}`")
-st.write(f"Main Area - `transcript_chunk_input` (first 50 chars): `{str(st.session_state.get('transcript_chunk_input', ''))[:50]}`")
+st.warning(f"Main Area Checkpoint (after potential rerun): `loaded_qdrant_chunk_id` = `{st.session_state.get('loaded_qdrant_chunk_id')}`")
+st.warning(f"Main Area Checkpoint (after potential rerun): `transcript_chunk_input` (first 70 chars) = `{str(st.session_state.get('transcript_chunk_input', ''))[:70]}`")
+st.warning(f"Main Area Checkpoint (after potential rerun): `loaded_qdrant_chunk_text` (first 70 chars) = `{str(st.session_state.get('loaded_qdrant_chunk_text', ''))[:70]}`")
 
 
-if st.session_state.loaded_qdrant_chunk_id:
-    st.info(f"Loaded chunk ID from Qdrant: {st.session_state.loaded_qdrant_chunk_id}")
-    # Display the loaded text but allow edits if needed, or make it read-only
+if st.session_state.get('loaded_qdrant_chunk_id'): # Use .get for safety, though it should be set
+    st.success(f"Main Area: Rendering text area for loaded chunk ID: {st.session_state.loaded_qdrant_chunk_id}")
+    st.write(f"Main Area (inside if): `st.session_state.transcript_chunk_input` to be used for text_area value (first 70 chars): `{str(st.session_state.get('transcript_chunk_input', ''))[:70]}`")
+    
+    # Make the key dynamic based on the loaded chunk ID
+    text_area_key = f"transcript_chunk_input_area_main_{st.session_state.loaded_qdrant_chunk_id}"
+    
     transcript_chunk = st.text_area(
         "Current transcript segment (loaded from Qdrant):",
         value=st.session_state.transcript_chunk_input, # This is updated when a Qdrant chunk is loaded
         height=250,
-        key="transcript_chunk_input_area_main",
+        key=text_area_key, # Use the dynamic key
         # disabled=True # Optionally make it non-editable if only annotating loaded chunks
     )
     # Ensure session state is updated if user somehow edits it (if not disabled)
