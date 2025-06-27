@@ -279,35 +279,72 @@ with st.sidebar:
 # --- Processing Logic ---
 if process_single_button:
     with st.status(f"Processing '{user_entered_name}'...", expanded=True) as status:
+        # Step 1: Parse the uploaded file
         subs = parse_srt_file_from_content(uploaded_file.getvalue())
+        
         if subs:
+            # Step 2: Chunk the transcript
             status.write("Chunking transcript...")
             chunks = srt_to_chunks(subs, chunk_size, overlap)
+            
+            # Step 3: Embed all chunks in batches
             status.write(f"Embedding {len(chunks)} chunks...")
             vectors = batch_get_embeddings([c['text'] for c in chunks])
+            
             points = []
             
+            # Step 4: Process each chunk individually for bio-extraction
             prog_bar = st.progress(0, text="Extracting biographical info...")
             for i, (chunk, vector) in enumerate(zip(chunks, vectors)):
-                prog_bar.progress((i + 1) / len(chunks))
+                prog_bar.progress((i + 1) / len(chunks), text=f"Processing chunk {i+1}/{len(chunks)}")
+                
                 if vector:
-                    payload = {"transcript_name": user_entered_name, "timestamp": chunk['timestamp'], "original_text": chunk['text']}
+                    # Basic payload
+                    payload = {
+                        "transcript_name": user_entered_name,
+                        "timestamp": chunk['timestamp'],
+                        "original_text": chunk['text']
+                    }
+                    
+                    # --- AUTOMATIC BIO-EXTRACTION LOGIC ---
                     if FINE_TUNED_BIO_MODEL_ID:
                         try:
-                            ft_response = client.chat.completions.create(model=FINE_TUNED_BIO_MODEL_ID, messages=[{"role": "system", "content": "You are an expert..."}, {"role": "user", "content": f"Chunk: \"{chunk['text']}\""}], response_format={"type": "json_object"}, max_tokens=4096, temperature=0.0)
+                            # Call the fine-tuned model for this chunk
+                            ft_response = client.chat.completions.create(
+                                model=FINE_TUNED_BIO_MODEL_ID,
+                                messages=[
+                                    {"role": "system", "content": "You are an expert at extracting specific biographical information, outputting a JSON object. If no info, use an empty list []."},
+                                    {"role": "user", "content": f"Chunk: \"{chunk['text']}\""}
+                                ],
+                                response_format={"type": "json_object"},
+                                max_tokens=4096,
+                                temperature=0.0
+                            )
                             parsed_data = json.loads(ft_response.choices[0].message.content)
+                            
+                            # Add the extracted data and boolean flags to the payload
                             payload['biographical_extractions'] = parsed_data
-                            for key in BIOGRAPHICAL_CATEGORY_KEYS: payload[f"has_{key}"] = bool(parsed_data.get(key))
-                        except Exception as e: logger.error(f"FT model error on chunk in {user_entered_name}: {e}")
+                            for key in BIOGRAPHICAL_CATEGORY_KEYS:
+                                payload[f"has_{key}"] = bool(parsed_data.get(key))
+                                
+                        except Exception as e:
+                            logger.error(f"FT model error on chunk in '{user_entered_name}': {e}")
+                    
+                    # Add the fully formed point to our list for upserting
                     points.append(models.PointStruct(id=str(uuid.uuid4()), vector=vector, payload=payload))
             
+            # Step 5: Upsert all processed points to Qdrant
             status.write("Storing results in database...")
-            upsert_to_qdrant(points)
+            if points:
+                upsert_to_qdrant(points)
+            
+            # Finalize and clear caches
             status.update(label="Processing complete!", state="complete")
-            get_processed_transcripts.clear(); get_processed_status.clear()
+            get_processed_transcripts.clear()
+            get_processed_status.clear()
+            st.rerun() # Rerun to refresh the UI with new data
         else:
             status.update(label="Failed to parse SRT file.", state="error")
-
 
 # === MAIN PAGE CONTENT ===
 # --- Search UI ---
