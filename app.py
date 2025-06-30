@@ -444,7 +444,41 @@ def extract_and_store_biographical_info(transcript_name_to_process: str, ft_mode
         if 'prog_bar' in locals() and prog_bar is not None: prog_bar.empty()
         if 'prog_text' in locals() and prog_text is not None: prog_text.empty()
 
-# === MAIN STREAMLIT UI ===
+# --- Helper functions to check processing status ---
+def get_transcripts_with_field(field_name: str) -> set:
+    """Return set of transcript names where at least one chunk has the given field."""
+    found = set()
+    if not qdrant_client:
+        return found
+    try:
+        offset_val = None
+        while True:
+            points_batch, next_offset_val = qdrant_client.scroll(
+                collection_name=COLLECTION_NAME,
+                limit=100,
+                offset=offset_val,
+                with_payload=["transcript_name", field_name],
+                with_vectors=False
+            )
+            for p in points_batch:
+                if p.payload and p.payload.get(field_name) is not None and 'transcript_name' in p.payload:
+                    found.add(p.payload['transcript_name'])
+            if not next_offset_val or not points_batch:
+                break
+            offset_val = next_offset_val
+    except Exception as e:
+        logger.error(f"Error checking transcripts with field {field_name}: {e}")
+    return found
+
+# --- Get processed transcript lists ---
+processed_transcript_list = get_processed_transcripts()
+claude_done = get_transcripts_with_field("entities")
+bio_done = get_transcripts_with_field("biographical_extractions")
+
+def highlight_transcript(name, done_set):
+    return f"✅ {name}" if name in done_set else name
+
+# --- STREAMLIT UI ---
 st.set_page_config(page_title="Gurudev Satsang Search", layout="wide", initial_sidebar_state="expanded")
 st.title("♻️ Gurudev's Words – Satsang Archive Search")
 
@@ -481,7 +515,15 @@ with st.sidebar:
     if not CLAUDE_API_KEY: st.warning("CLAUDE_API_KEY not set.", icon="🔒")
     else:
         if processed_transcript_list:
-            selected_transcript_for_claude_tagging = st.selectbox("Select Transcript for Claude Entities:", options=[""] + processed_transcript_list, index=0, key="transcript_select_for_claude_tagging")
+            claude_options = [highlight_transcript(n, claude_done) for n in processed_transcript_list]
+            selected_transcript_for_claude_tagging = st.selectbox(
+                "Select Transcript for Claude Entities:",
+                options=[""] + claude_options,
+                index=0,
+                key="transcript_select_for_claude_tagging"
+            )
+            # Map back to original name
+            selected_transcript_for_claude_tagging = selected_transcript_for_claude_tagging.replace("✅ ", "")
             if st.button("3a. Tag with Claude Entities", disabled=not selected_transcript_for_claude_tagging, key="claude_tag_button"):
                 with st.spinner(f"Initiating Claude entity tagging for '{selected_transcript_for_claude_tagging}'..."):
                     tag_transcript_entities_post_processing(selected_transcript_for_claude_tagging)
@@ -492,62 +534,53 @@ with st.sidebar:
         st.caption("FINE_TUNED_BIO_MODEL_ID not set in env. Bio-extraction disabled.")
     else:
         if processed_transcript_list:
-            selected_transcript_for_bio_extraction = st.selectbox("Select Transcript for Bio-Extraction:", options=[""] + processed_transcript_list, index=0, key="transcript_select_for_bio_extraction")
+            bio_options = [highlight_transcript(n, bio_done) for n in processed_transcript_list]
+            selected_transcript_for_bio_extraction = st.selectbox(
+                "Select Transcript for Bio-Extraction:",
+                options=[""] + bio_options,
+                index=0,
+                key="transcript_select_for_bio_extraction"
+            )
+            selected_transcript_for_bio_extraction = selected_transcript_for_bio_extraction.replace("✅ ", "")
             if st.button("3b. Extract Biographical Details (Fine-tuned Model)", disabled=not selected_transcript_for_bio_extraction, key="bio_extract_button"):
                 with st.spinner(f"Initiating fine-tuned bio-extraction for '{selected_transcript_for_bio_extraction}'..."):
                     extract_and_store_biographical_info(selected_transcript_for_bio_extraction, FINE_TUNED_BIO_MODEL_ID)
         else:
             st.caption("Process transcripts first.")
 
-
-if process_button_clicked:
-    with st.status(f"Processing '{final_transcript_name_for_processing}' (embedding chunks)...", expanded=True) as status_container:
-        st.write("Checking for existing transcript..."); logger.info(f"Processing: '{final_transcript_name_for_processing}'")
-        already_exists = False
+# --- Transcript Rename Functionality ---
+st.markdown("---")
+st.subheader("✏️ Rename Transcript")
+if processed_transcript_list:
+    transcript_to_rename = st.selectbox("Select transcript to rename:", options=processed_transcript_list, key="rename_transcript_select")
+    new_name = st.text_input("New transcript name:", key="rename_transcript_input")
+    if st.button("Rename Transcript", key="rename_transcript_button") and new_name.strip():
+        # Update all points with this transcript_name
         try:
-            scroll_res, _ = qdrant_client.scroll(COLLECTION_NAME, scroll_filter=models.Filter(must=[models.FieldCondition(key="transcript_name",match=models.MatchValue(value=final_transcript_name_for_processing))]), limit=1, with_payload=False, with_vectors=False)
-            already_exists = bool(scroll_res)
-        except Exception as e: status_container.update(label=f"Qdrant check error: {e}",state="error"); logger.error(f"Qdrant check error: {e}"); st.stop()
-        
-        if already_exists:
-            st.write(f"⚠️ Transcript '{final_transcript_name_for_processing}' may already exist. Processing will continue.")
-            status_container.update(label=f"Processing '{final_transcript_name_for_processing}' (Note: may already exist)...", state="running")
-
-        temp_srt_path = ""
-        try:
-            st.write(f"Saving temp SRT for '{uploaded_file.name}'...");
-            with tempfile.NamedTemporaryFile(mode="wb", suffix=".srt", delete=False) as tmp_f: tmp_f.write(uploaded_file.getvalue()); temp_srt_path = tmp_f.name
-            st.write("Parsing SRT..."); parsed_subs = parse_srt_file(temp_srt_path)
-            if not parsed_subs: status_container.update(label="SRT empty/unparsable.",state="error"); st.stop()
-            st.write(f"Chunking (size: {chunk_size_words_input}, overlap: {overlap_words_input})...");
-            chunks = srt_to_chunks(parsed_subs, chunk_size_words_input, overlap_words_input); total_c = len(chunks)
-            if total_c == 0: status_container.update(label="No chunks created.",state="error"); st.stop()
-            st.write(f"{total_c} chunks created.")
-
-            prog = st.progress(0, text="Embedding & Storing Chunks...")
-            all_q_points = []
-            for i in range(0, total_c, EMBED_BATCH_SIZE):
-                batch_chunks = chunks[i : i + EMBED_BATCH_SIZE]
-                texts = [c['text'] for c in batch_chunks]
-                vecs = batch_get_embeddings(texts)
-                batch_q_points = []
-                for idx, (chk_data, vec_emb) in enumerate(zip(batch_chunks, vecs)):
-                    actual_chunk_idx = i + idx
-                    prog_text_update = f"Embedding & Storing: {actual_chunk_idx+1}/{total_c}"
-                    if vec_emb is None: prog.progress((actual_chunk_idx+1)/total_c, text=f"{prog_text_update} (Skipped)"); continue
-                    payload_dict = {"transcript_name": final_transcript_name_for_processing, "timestamp": chk_data['timestamp'], "original_text": chk_data['text']}
-                    batch_q_points.append({'id': str(uuid.uuid4()), 'vector': vec_emb, 'payload': payload_dict})
-                    prog.progress((actual_chunk_idx+1)/total_c, text=prog_text_update)
-                if batch_q_points: all_q_points.extend(batch_q_points)
-            
-            if all_q_points: st.write(f"Upserting {len(all_q_points)} points to Qdrant..."); upsert_to_qdrant(all_q_points)
-            status_container.update(label=f"'{final_transcript_name_for_processing}' processed and stored!", state="complete")
-            logger.info(f"Stored transcript: {final_transcript_name_for_processing}"); get_processed_transcripts.clear()
-        except Exception as e_proc: status_container.update(label=f"Processing error: {e_proc}",state="error"); logger.error(f"Processing error: {e_proc}", exc_info=True)
-        finally:
-            if temp_srt_path and Path(temp_srt_path).exists():
-                try: Path(temp_srt_path).unlink(); logger.info(f"Deleted temp SRT: {temp_srt_path}")
-                except OSError as e_del_f: logger.error(f"Error deleting temp file {temp_srt_path}: {e_del_f}")
+            offset_val = None
+            updated = 0
+            while True:
+                points_batch, next_offset_val = qdrant_client.scroll(
+                    collection_name=COLLECTION_NAME,
+                    scroll_filter=models.Filter(must=[models.FieldCondition(key="transcript_name", match=models.MatchValue(value=transcript_to_rename))]),
+                    limit=100,
+                    offset=offset_val,
+                    with_payload=True,
+                    with_vectors=False
+                )
+                ids = [p.id for p in points_batch]
+                if ids:
+                    qdrant_client.set_payload(collection_name=COLLECTION_NAME, payload={"transcript_name": new_name}, points=ids, wait=True)
+                    updated += len(ids)
+                if not next_offset_val or not points_batch:
+                    break
+                offset_val = next_offset_val
+            st.success(f"Renamed '{transcript_to_rename}' to '{new_name}' in {updated} chunks.")
+            get_processed_transcripts.clear()
+        except Exception as e:
+            st.error(f"Failed to rename transcript: {e}")
+else:
+    st.caption("No transcripts to rename.")
 
 # --- Search UI ---
 st.markdown("---")
@@ -770,14 +803,12 @@ if processed_transcript_list_for_explorer:
                         st.markdown("**Extracted Quotes (for verification):**")
                         has_quotes = False
                         for key, quotes in fine_tuned_extractions.items():
-                            if quotes and isinstance(quotes, list):
+                            if quotes and isinstance(quotes, list) and quotes:
                                 has_quotes = True
-                                st.markdown(f"- **{key.replace('_', ' ').title()}:** {quotes}")
+                                st.markdown(f"- **{key.replace('_', ' ').title()}:**")
+                                for q in quotes:
+                                    st.markdown(f"    - _\"{q}\"_")
                         if not has_quotes:
-                             st.caption("(No specific quotes were extracted.)")
-                    
-else:
-    st.caption("Process a transcript first to inspect its data here.")
-
-
-
+                            st.caption("(No specific quotes were extracted.)")
+                    else:
+                        st.caption("No biographical extractions found for this chunk.")
