@@ -10,12 +10,12 @@ Gurudev Satsang Transcript Processing Pipeline + Streamlit UI
 """
 
 import os
+import streamlit as st
 import uuid
 import srt
 import httpx
 import json
 import re
-import streamlit as st
 from qdrant_client import QdrantClient, models
 from pathlib import Path
 from openai import OpenAI, OpenAIError
@@ -23,7 +23,7 @@ from dotenv import load_dotenv, find_dotenv
 import tempfile
 import logging
 import ast
-
+st.set_page_config(page_title="Gurudev Satsang Search", layout="wide", initial_sidebar_state="expanded")
 # === CONFIG ===
 load_dotenv(find_dotenv())
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -479,7 +479,7 @@ def highlight_transcript(name, done_set):
     return f"✅ {name}" if name in done_set else name
 
 # --- STREAMLIT UI ---
-st.set_page_config(page_title="Gurudev Satsang Search", layout="wide", initial_sidebar_state="expanded")
+
 st.title("♻️ Gurudev's Words – Satsang Archive Search")
 
 with st.sidebar:
@@ -548,39 +548,37 @@ with st.sidebar:
         else:
             st.caption("Process transcripts first.")
 
-# --- Transcript Rename Functionality ---
-st.markdown("---")
-st.subheader("✏️ Rename Transcript")
-if processed_transcript_list:
-    transcript_to_rename = st.selectbox("Select transcript to rename:", options=processed_transcript_list, key="rename_transcript_select")
-    new_name = st.text_input("New transcript name:", key="rename_transcript_input")
-    if st.button("Rename Transcript", key="rename_transcript_button") and new_name.strip():
-        # Update all points with this transcript_name
-        try:
-            offset_val = None
-            updated = 0
-            while True:
-                points_batch, next_offset_val = qdrant_client.scroll(
-                    collection_name=COLLECTION_NAME,
-                    scroll_filter=models.Filter(must=[models.FieldCondition(key="transcript_name", match=models.MatchValue(value=transcript_to_rename))]),
-                    limit=100,
-                    offset=offset_val,
-                    with_payload=True,
-                    with_vectors=False
-                )
-                ids = [p.id for p in points_batch]
-                if ids:
-                    qdrant_client.set_payload(collection_name=COLLECTION_NAME, payload={"transcript_name": new_name}, points=ids, wait=True)
-                    updated += len(ids)
-                if not next_offset_val or not points_batch:
-                    break
-                offset_val = next_offset_val
-            st.success(f"Renamed '{transcript_to_rename}' to '{new_name}' in {updated} chunks.")
-            get_processed_transcripts.clear()
-        except Exception as e:
-            st.error(f"Failed to rename transcript: {e}")
-else:
-    st.caption("No transcripts to rename.")
+    st.markdown("---")
+    st.subheader("✏️ Rename Transcript")
+    if processed_transcript_list:
+        transcript_to_rename = st.selectbox("Select transcript to rename:", options=processed_transcript_list, key="rename_transcript_select")
+        new_name = st.text_input("New transcript name:", key="rename_transcript_input")
+        if st.button("Rename Transcript", key="rename_transcript_button") and new_name.strip():
+            try:
+                offset_val = None
+                updated = 0
+                while True:
+                    points_batch, next_offset_val = qdrant_client.scroll(
+                        collection_name=COLLECTION_NAME,
+                        scroll_filter=models.Filter(must=[models.FieldCondition(key="transcript_name", match=models.MatchValue(value=transcript_to_rename))]),
+                        limit=100,
+                        offset=offset_val,
+                        with_payload=True,
+                        with_vectors=False
+                    )
+                    ids = [p.id for p in points_batch]
+                    if ids:
+                        qdrant_client.set_payload(collection_name=COLLECTION_NAME, payload={"transcript_name": new_name}, points=ids, wait=True)
+                        updated += len(ids)
+                    if not next_offset_val or not points_batch:
+                        break
+                    offset_val = next_offset_val
+                st.success(f"Renamed '{transcript_to_rename}' to '{new_name}' in {updated} chunks.")
+                get_processed_transcripts.clear()
+            except Exception as e:
+                st.error(f"Failed to rename transcript: {e}")
+    else:
+        st.caption("No transcripts to rename.")
 
 # --- Search UI ---
 st.markdown("---")
@@ -601,7 +599,6 @@ selected_bio_category_keys_for_qdrant_filter = [
 
 col_opt1, col_opt2, col_opt3 = st.columns(3)
 with col_opt1: use_llm_reranking = st.checkbox("Enable LLM Reranking", value=True, key="rerank_toggle_checkbox", help=f"Uses {RERANK_MODEL}")
-with col_opt2: do_pinpoint_answer_extraction = st.checkbox("Pinpoint Answer Snippet", value=True, key="pinpoint_answer_checkbox", help=f"Uses {ANSWER_EXTRACTION_MODEL}")
 with col_opt3: initial_search_results_limit = st.slider("Initial results:", 3, 30, 5, key="search_results_limit_slider")
 custom_reranking_instructions_input = ""
 if use_llm_reranking: custom_reranking_instructions_input = st.text_area("Custom Reranking Instructions (Optional):", placeholder="e.g., 'Prioritize practical advice.'", key="custom_rerank_instructions_input_area", height=100)
@@ -659,16 +656,7 @@ if search_query_input:
             exp_title_str = f"Result {i} @ {payload_data_item.get('timestamp','N/A')} | Transcript: {payload_data_item.get('transcript_name','N/A')}"
             
             with st.expander(exp_title_str, expanded=(i==1)):
-                if do_pinpoint_answer_extraction and full_chunk_text_item != 'Error: Text missing':
-                    with st.spinner(f"Pinpointing answer for result {i}..."):
-                        answer_span_text = extract_answer_span(search_query_input, full_chunk_text_item, ANSWER_EXTRACTION_MODEL)
-                    if answer_span_text and answer_span_text.strip() and \
-                       answer_span_text.strip().lower() != full_chunk_text_item.strip().lower() and \
-                       len(answer_span_text.strip()) < len(full_chunk_text_item.strip()):
-                        st.markdown(f"🎯 **Pinpointed Answer Snippet:**\n> *{answer_span_text.strip()}*"); st.markdown("--- \n**Full Context Chunk:**")
-                    elif answer_span_text and answer_span_text.strip().lower() == full_chunk_text_item.strip().lower():
-                         st.caption(f"(Full chunk identified as most direct answer by {ANSWER_EXTRACTION_MODEL})")
-                
+                           
                 st.markdown(full_chunk_text_item)
                 
                 claude_entities_dict = payload_data_item.get('entities')
@@ -803,11 +791,11 @@ if processed_transcript_list_for_explorer:
                         st.markdown("**Extracted Quotes (for verification):**")
                         has_quotes = False
                         for key, quotes in fine_tuned_extractions.items():
-                            if quotes and isinstance(quotes, list) and quotes:
+                            if isinstance(quotes, list) and quotes:
                                 has_quotes = True
                                 st.markdown(f"- **{key.replace('_', ' ').title()}:**")
                                 for q in quotes:
-                                    st.markdown(f"    - _\"{q}\"_")
+                                    st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;- _\"{q}\"_", unsafe_allow_html=True)
                         if not has_quotes:
                             st.caption("(No specific quotes were extracted.)")
                     else:
