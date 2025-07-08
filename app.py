@@ -23,6 +23,8 @@ from dotenv import load_dotenv, find_dotenv
 import tempfile
 import logging
 import ast
+import pandas as pd
+from io import BytesIO
 st.set_page_config(page_title="Gurudev Satsang Search", layout="wide", initial_sidebar_state="expanded")
 # === CONFIG ===
 load_dotenv(find_dotenv())
@@ -580,6 +582,42 @@ with st.sidebar:
     else:
         st.caption("No transcripts to rename.")
 
+    st.markdown("---")
+    st.subheader("🗑️ Delete Transcript")
+    if processed_transcript_list:
+        transcript_to_delete = st.selectbox(
+            "Select transcript to delete:",
+            options=processed_transcript_list,
+            key="delete_transcript_select"
+        )
+        confirm_delete = st.checkbox("Confirm delete", key="confirm_delete_checkbox")
+        if st.button("Delete Transcript", key="delete_transcript_button", disabled=not confirm_delete):
+            try:
+                offset_val = None
+                deleted = 0
+                while True:
+                    points_batch, next_offset_val = qdrant_client.scroll(
+                        collection_name=COLLECTION_NAME,
+                        scroll_filter=models.Filter(must=[models.FieldCondition(key="transcript_name", match=models.MatchValue(value=transcript_to_delete))]),
+                        limit=100,
+                        offset=offset_val,
+                        with_payload=True,
+                        with_vectors=False
+                    )
+                    ids = [p.id for p in points_batch]
+                    if ids:
+                        qdrant_client.delete(collection_name=COLLECTION_NAME, points_selector=models.PointIdsList(points=ids), wait=True)
+                        deleted += len(ids)
+                    if not next_offset_val or not points_batch:
+                        break
+                    offset_val = next_offset_val
+                st.success(f"Deleted transcript '{transcript_to_delete}' ({deleted} chunks removed).")
+                get_processed_transcripts.clear()
+            except Exception as e:
+                st.error(f"Failed to delete transcript: {e}")
+    else:
+        st.caption("No transcripts to delete.")
+
 # --- Search UI ---
 st.markdown("---")
 st.header("🔍 Semantic Search & Analysis")
@@ -800,3 +838,33 @@ if processed_transcript_list_for_explorer:
                             st.caption("(No specific quotes were extracted.)")
                     else:
                         st.caption("No biographical extractions found for this chunk.")
+
+    # --- Export Bio-Extracted Quotes to Excel ---
+    if selected_transcript_to_inspect:
+        export_rows = []
+        for point in transcript_chunks:
+            payload = point.payload
+            satsang_name = payload.get('transcript_name', '')
+            bio_extractions = payload.get('biographical_extractions', {})
+            if isinstance(bio_extractions, dict):
+                for category, quotes in bio_extractions.items():
+                    if isinstance(quotes, list) and quotes:
+                        for quote in quotes:
+                            export_rows.append({
+                                "Chunk": quote,
+                                "Satsang Name": satsang_name,
+                                "Category": category.replace("_", " ").title()
+                            })
+        if export_rows:
+            df = pd.DataFrame(export_rows)
+            output = BytesIO()
+            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                df.to_excel(writer, index=False, sheet_name='Bio Extractions')
+            st.download_button(
+                label="⬇️ Download Bio-Extracted Quotes (Excel)",
+                data=output.getvalue(),
+                file_name=f"{selected_transcript_to_inspect}_bio_extractions.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+        else:
+            st.info("No bio-extracted quotes found for this transcript.")
