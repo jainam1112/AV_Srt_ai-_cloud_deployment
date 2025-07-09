@@ -617,6 +617,11 @@ with st.sidebar:
         "Satsang Name",
         key="satsang_name_input"
     )
+    satsang_code = st.text_input(
+        "Satsang Code",
+        key="satsang_code_input",
+        help="Enter unique code/reference number for the satsang"
+    )
     misc_tag = st.text_input(
         "Miscellaneous Tags",
         key="misc_tag_input",
@@ -672,6 +677,7 @@ def process_chunks_with_metadata(chunks, metadata):
             'location': metadata['location'],
             'speaker': metadata['speaker'],
             'satsang_name': metadata['satsang_name'],
+            'satsang_code': metadata['satsang_code'],  # Add this line
             'misc_tags': metadata['misc_tags'],
             'transcript_name': metadata['transcript_name']
         }
@@ -691,6 +697,7 @@ if process_button_clicked:
                 'location': location_input,
                 'speaker': speaker_input,
                 'satsang_name': satsang_name,
+                'satsang_code': satsang_code,  # Add this line
                 'misc_tags': [tag.strip() for tag in misc_tag.split(',')] if misc_tag else [],
                 'transcript_name': final_transcript_name_for_processing
             }
