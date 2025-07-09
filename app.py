@@ -65,6 +65,47 @@ BIOGRAPHICAL_CATEGORY_KEYS = [
     "books_references_general"
 ]
 
+SATSANG_CATEGORIES = [
+    "Pravachan",
+    "Udgosh",
+    "Meetings",
+    "Prasangik Bodh",
+    "Ashirvachan",
+    "Experiences",
+    "Miscellaneous"
+]
+
+LOCATIONS = [
+    "Sayla",
+    "Surat",
+    "Vadodara",
+    "Ahmedabad", 
+    "Mumbai",
+    "Rajkot",
+    "Bhavnagar",
+    "Morbi",
+    "Junagadh",
+    "Jamnagar",
+    "Gandhinagar",
+    "Nadiad",
+    "Anand",
+    "Bharuch",
+    "Navsari",
+    "Vapi"
+]
+
+SPEAKERS = [
+    "Gurudev",
+    "P. Pu. Bapuji",
+    "P. Pu. Sadgurudev",
+    "Sadguru Shashtriji Maharaj",
+    "Bhaishree",
+    "Param Pujya Bhaishree",
+    "P. Pu. Ladakchandbhai",
+    "Brahmanishth Vikrambhai",
+    "Brahmanishth Rajubhai"
+]
+
 # === INITIALIZATION ===
 if not OPENAI_API_KEY: st.error("OPENAI_API_KEY not found."); st.stop()
 try: client = OpenAI(api_key=OPENAI_API_KEY)
@@ -184,6 +225,8 @@ if qdrant_client:
 # ... (I'm omitting the rest of the file for brevity as it remains unchanged)
 # The full script with all helper functions and the UI should be used with this corrected setup function.
 # The code below is just for completeness of the file structure.
+
+
 
 def parse_srt_file(file_path: str) -> list:
     try:
@@ -480,391 +523,372 @@ bio_done = get_transcripts_with_field("biographical_extractions")
 def highlight_transcript(name, done_set):
     return f"✅ {name}" if name in done_set else name
 
+@st.cache_data(ttl=30) 
+def get_all_chunks_for_transcript(transcript_name_to_inspect: str) -> list:
+    if not qdrant_client or not transcript_name_to_inspect: return []
+    all_points_data = []
+    try:
+        offset_val = None
+        while True:
+            points_batch, next_offset_val = qdrant_client.scroll(
+                collection_name=COLLECTION_NAME,
+                scroll_filter=models.Filter(must=[models.FieldCondition(key="transcript_name", match=models.MatchValue(value=transcript_name_to_inspect))]),
+                limit=100, offset=offset_val, with_payload=True, with_vectors=False
+            )
+            if not points_batch: break
+            for point in points_batch:
+                all_points_data.append({"id": str(point.id), "payload": point.payload})
+            if not next_offset_val: break
+            offset_val = next_offset_val
+        logger.info(f"Retrieved {len(all_points_data)} chunks for inspection from '{transcript_name_to_inspect}'.")
+        return all_points_data
+    except Exception as e:
+        st.error(f"Error fetching chunks for inspection from '{transcript_name_to_inspect}': {e}")
+        logger.error(f"Error fetching chunks for inspection: {e}", exc_info=True)
+        return []
 # --- STREAMLIT UI ---
 
 st.title("♻️ Gurudev's Words – Satsang Archive Search")
 
 with st.sidebar:
     st.header("⚙️ Ingestion & Processing")
+    
+    # File upload
     uploaded_file = st.file_uploader("1. Upload .srt transcript", type=["srt"])
-    st.subheader("📚 Processed Transcripts")
-    processed_transcript_list = get_processed_transcripts()
-    if processed_transcript_list:
-        with st.expander("Show/Hide List", expanded=False):
-            for item_name in processed_transcript_list: st.caption(f"• {item_name}")
-    else: st.caption("No transcripts processed or unable to fetch.")
-
-    default_transcript_name = Path(uploaded_file.name).stem if uploaded_file else ""
-    if 'current_transcript_name_input' not in st.session_state: st.session_state.current_transcript_name_input = default_transcript_name
-    if uploaded_file and default_transcript_name != st.session_state.get('last_uploaded_filename_stem_for_input', ''):
-        st.session_state.current_transcript_name_input = default_transcript_name
-        st.session_state.last_uploaded_filename_stem_for_input = default_transcript_name
-    user_entered_transcript_name = st.text_input("Transcript Name (for processing):", value=st.session_state.current_transcript_name_input, key="transcript_name_user_input_field")
-    if user_entered_transcript_name != st.session_state.current_transcript_name_input: st.session_state.current_transcript_name_input = user_entered_transcript_name
-    final_transcript_name_for_processing = st.session_state.current_transcript_name_input
-
-    chunk_size_words_input = st.number_input("Chunk size (words)", 50, 2000, 400, 50, key="chunk_size_input")
-    overlap_words_input = st.number_input("Chunk overlap (words)", 0, 1000, 75, 25, key="overlap_input")
-    if overlap_words_input >= chunk_size_words_input and chunk_size_words_input > 0: st.warning("Overlap < chunk size advised.", icon="⚠️")
     
-    st.markdown("---")
-    st.markdown("**Initial Processing (Embed & Store):**")
-    process_button_clicked = st.button("2. Process Transcript (Embeds Chunks)", disabled=not uploaded_file or not final_transcript_name_for_processing.strip(), key="process_srt_button")
-
-    st.markdown("---")
-    st.subheader("🏷️ Post-Processing Steps")
-    st.markdown("**Claude Entity Tagging:**")
-    if not CLAUDE_API_KEY: st.warning("CLAUDE_API_KEY not set.", icon="🔒")
-    else:
-        if processed_transcript_list:
-            claude_options = [highlight_transcript(n, claude_done) for n in processed_transcript_list]
-            selected_transcript_for_claude_tagging = st.selectbox(
-                "Select Transcript for Claude Entities:",
-                options=[""] + claude_options,
-                index=0,
-                key="transcript_select_for_claude_tagging"
-            )
-            # Map back to original name
-            selected_transcript_for_claude_tagging = selected_transcript_for_claude_tagging.replace("✅ ", "")
-            if st.button("3a. Tag with Claude Entities", disabled=not selected_transcript_for_claude_tagging, key="claude_tag_button"):
-                with st.spinner(f"Initiating Claude entity tagging for '{selected_transcript_for_claude_tagging}'..."):
-                    tag_transcript_entities_post_processing(selected_transcript_for_claude_tagging)
-        else: st.caption("Process transcripts first.")
-
-    st.markdown("**Fine-Tuned Biographical Extraction:**")
-    if not FINE_TUNED_BIO_MODEL_ID:
-        st.caption("FINE_TUNED_BIO_MODEL_ID not set in env. Bio-extraction disabled.")
-    else:
-        if processed_transcript_list:
-            bio_options = [highlight_transcript(n, bio_done) for n in processed_transcript_list]
-            selected_transcript_for_bio_extraction = st.selectbox(
-                "Select Transcript for Bio-Extraction:",
-                options=[""] + bio_options,
-                index=0,
-                key="transcript_select_for_bio_extraction"
-            )
-            selected_transcript_for_bio_extraction = selected_transcript_for_bio_extraction.replace("✅ ", "")
-            if st.button("3b. Extract Biographical Details (Fine-tuned Model)", disabled=not selected_transcript_for_bio_extraction, key="bio_extract_button"):
-                with st.spinner(f"Initiating fine-tuned bio-extraction for '{selected_transcript_for_bio_extraction}'..."):
-                    extract_and_store_biographical_info(selected_transcript_for_bio_extraction, FINE_TUNED_BIO_MODEL_ID)
-        else:
-            st.caption("Process transcripts first.")
-
-    st.markdown("---")
-    st.subheader("✏️ Rename Transcript")
-    if processed_transcript_list:
-        transcript_to_rename = st.selectbox("Select transcript to rename:", options=processed_transcript_list, key="rename_transcript_select")
-        new_name = st.text_input("New transcript name:", key="rename_transcript_input")
-        if st.button("Rename Transcript", key="rename_transcript_button") and new_name.strip():
-            try:
-                offset_val = None
-                updated = 0
-                while True:
-                    points_batch, next_offset_val = qdrant_client.scroll(
-                        collection_name=COLLECTION_NAME,
-                        scroll_filter=models.Filter(must=[models.FieldCondition(key="transcript_name", match=models.MatchValue(value=transcript_to_rename))]),
-                        limit=100,
-                        offset=offset_val,
-                        with_payload=True,
-                        with_vectors=False
-                    )
-                    ids = [p.id for p in points_batch]
-                    if ids:
-                        qdrant_client.set_payload(collection_name=COLLECTION_NAME, payload={"transcript_name": new_name}, points=ids, wait=True)
-                        updated += len(ids)
-                    if not next_offset_val or not points_batch:
-                        break
-                    offset_val = next_offset_val
-                st.success(f"Renamed '{transcript_to_rename}' to '{new_name}' in {updated} chunks.")
-                get_processed_transcripts.clear()
-            except Exception as e:
-                st.error(f"Failed to rename transcript: {e}")
-    else:
-        st.caption("No transcripts to rename.")
-
-    st.markdown("---")
-    st.subheader("🗑️ Delete Transcript")
-    if processed_transcript_list:
-        transcript_to_delete = st.selectbox(
-            "Select transcript to delete:",
-            options=processed_transcript_list,
-            key="delete_transcript_select"
+    # Metadata input fields
+    col1, col2 = st.columns(2)
+    with col1:
+        transcript_date = st.date_input(
+            "Date of Satsang",
+            key="transcript_date_input"
         )
-        confirm_delete = st.checkbox("Confirm delete", key="confirm_delete_checkbox")
-        if st.button("Delete Transcript", key="delete_transcript_button", disabled=not confirm_delete):
-            try:
-                offset_val = None
-                deleted = 0
-                while True:
-                    points_batch, next_offset_val = qdrant_client.scroll(
-                        collection_name=COLLECTION_NAME,
-                        scroll_filter=models.Filter(must=[models.FieldCondition(key="transcript_name", match=models.MatchValue(value=transcript_to_delete))]),
-                        limit=100,
-                        offset=offset_val,
-                        with_payload=True,
-                        with_vectors=False
-                    )
-                    ids = [p.id for p in points_batch]
-                    if ids:
-                        qdrant_client.delete(collection_name=COLLECTION_NAME, points_selector=models.PointIdsList(points=ids), wait=True)
-                        deleted += len(ids)
-                    if not next_offset_val or not points_batch:
-                        break
-                    offset_val = next_offset_val
-                st.success(f"Deleted transcript '{transcript_to_delete}' ({deleted} chunks removed).")
-                get_processed_transcripts.clear()
-            except Exception as e:
-                st.error(f"Failed to delete transcript: {e}")
-    else:
-        st.caption("No transcripts to delete.")
+    with col2:
+        transcript_category = st.selectbox(
+            "Category",
+            options=SATSANG_CATEGORIES,
+            key="transcript_category_input"
+        )
 
-# --- Search UI ---
-st.markdown("---")
-st.header("🔍 Semantic Search & Analysis")
-search_query_input = st.text_input("Enter your search query:", key="main_search_query_input")
-
-st.write("**Filter by Biographical Content** (Applies if fine-tuned bio-extraction has been run):")
-human_readable_bio_categories = {key: key.replace("_", " ").title() for key in BIOGRAPHICAL_CATEGORY_KEYS}
-selected_bio_categories_human_readable = st.multiselect(
-    "Filter for chunks containing ANY of these biographical aspects:",
-    options=list(human_readable_bio_categories.values()),
-    key="bio_category_multiselect_filter_key"
-)
-selected_bio_category_keys_for_qdrant_filter = [
-    key for key, human_readable in human_readable_bio_categories.items()
-    if human_readable in selected_bio_categories_human_readable
-]
-
-col_opt1, col_opt2, col_opt3 = st.columns(3)
-with col_opt1: use_llm_reranking = st.checkbox("Enable LLM Reranking", value=True, key="rerank_toggle_checkbox", help=f"Uses {RERANK_MODEL}")
-with col_opt3: initial_search_results_limit = st.slider("Initial results:", 3, 30, 5, key="search_results_limit_slider")
-custom_reranking_instructions_input = ""
-if use_llm_reranking: custom_reranking_instructions_input = st.text_area("Custom Reranking Instructions (Optional):", placeholder="e.g., 'Prioritize practical advice.'", key="custom_rerank_instructions_input_area", height=100)
-
-if search_query_input:
-    with st.spinner("Searching and analyzing results..."):
-        try: query_vector = client.embeddings.create(model=EMBEDDING_MODEL, input=[search_query_input]).data[0].embedding
-        except Exception as e: st.error(f"Query embed fail: {e}"); logger.error(f"Query embed error: {e}"); st.stop()
-        
-        qdrant_filter_conditions = []
-        if selected_bio_category_keys_for_qdrant_filter:
-            for cat_key in selected_bio_category_keys_for_qdrant_filter:
-                flag_field_name = f"has_{cat_key}"
-                qdrant_filter_conditions.append(models.FieldCondition(key=flag_field_name, match=models.MatchValue(value=True)))
-        
-        final_qdrant_filter = models.Filter(should=qdrant_filter_conditions) if qdrant_filter_conditions else None
-
-        try: 
-            qdrant_hits = qdrant_client.search(
-                collection_name=COLLECTION_NAME, query_vector=query_vector, 
-                query_filter=final_qdrant_filter, limit=initial_search_results_limit, with_payload=True
-            )
-        except Exception as e: st.error(f"Qdrant search fail: {e}"); logger.error(f"Qdrant search error: {e}"); st.stop()
-        
-        retrieved_payloads = [h.payload for h in qdrant_hits if h.payload]
-        if not retrieved_payloads: st.info("No results found matching your query and selected filters."); st.stop()
-
-        if use_llm_reranking and len(retrieved_payloads) > 1:
-            with st.spinner(f"Reranking with {RERANK_MODEL}..."):
-                excerpts = [f"[{i+1}] {rp.get('original_text', 'N/A')}" for i, rp in enumerate(retrieved_payloads)]
-                instr = "Rerank by relevance to query."
-                if custom_reranking_instructions_input: instr += f" Criteria: {custom_reranking_instructions_input}."
-                prompt_rerank = (f"{instr}\nQuery: \"{search_query_input}\"\nExcerpts:\n{chr(10).join(excerpts)}\nReturn only comma-separated original indices reranked.")
-                try:
-                    resp = client.chat.completions.create(model=RERANK_MODEL, messages=[{"role":"system", "content":"You rerank results."}, {"role":"user", "content":prompt_rerank}], max_tokens=200, temperature=0.0)
-                    indices_str = resp.choices[0].message.content.strip()
-                    parsed_idx, seen_idx = [], set()
-                    for s_idx in re.findall(r'\d+', indices_str):
-                        val = int(s_idx) - 1
-                        if 0 <= val < len(retrieved_payloads) and val not in seen_idx: parsed_idx.append(val); seen_idx.add(val)
-                    if parsed_idx:
-                        final_order_idx = parsed_idx + [i for i in range(len(retrieved_payloads)) if i not in seen_idx]
-                        retrieved_payloads = [retrieved_payloads[i] for i in final_order_idx]
-                        st.caption(f"ℹ️ Results reranked by {RERANK_MODEL}.")
-                    else: st.warning("Reranking failed/no change. Original order.", icon="⚠️")
-                except Exception as e_rr_exc: st.warning(f"Reranking error: {e_rr_exc}. Original order.", icon="⚠️"); logger.error(f"Reranking error: {e_rr_exc}")
-        
-        st.subheader(f"Search Results for: \"{search_query_input}\"")
-        if selected_bio_category_keys_for_qdrant_filter:
-            st.caption(f"Filtered for: {', '.join(selected_bio_categories_human_readable)}")
-
-        for i, payload_data_item in enumerate(retrieved_payloads, 1):
-            if not isinstance(payload_data_item, dict): continue
-            full_chunk_text_item = payload_data_item.get('original_text', 'Error: Text missing')
-            exp_title_str = f"Result {i} @ {payload_data_item.get('timestamp','N/A')} | Transcript: {payload_data_item.get('transcript_name','N/A')}"
-            
-            with st.expander(exp_title_str, expanded=(i==1)):
-                           
-                st.markdown(full_chunk_text_item)
-                
-                claude_entities_dict = payload_data_item.get('entities')
-                if claude_entities_dict and isinstance(claude_entities_dict, dict):
-                    entity_display_parts = []
-                    if claude_entities_dict.get('people'): entity_display_parts.append(f"**People:** {', '.join(claude_entities_dict['people'])}")
-                    if claude_entities_dict.get('places'): entity_display_parts.append(f"**Places:** {', '.join(claude_entities_dict['places'])}")
-                    if 'self_references' in claude_entities_dict:
-                        sr_val = claude_entities_dict.get('self_references')
-                        sr_disp = "Yes" if sr_val is True else ("No" if sr_val is False else str(sr_val))
-                        entity_display_parts.append(f"**Self-ref:** {sr_disp}")
-                    if entity_display_parts: st.markdown("---"); st.markdown(" ".join(entity_display_parts), unsafe_allow_html=True)
-                
-                fine_tuned_bio_data = payload_data_item.get('biographical_extractions')
-                if fine_tuned_bio_data and isinstance(fine_tuned_bio_data, dict):
-                    st.markdown("--- \n**Biographical Details (Extracted by Fine-tuned Model):**")
-                    has_any_bio_detail_displayed = False
-                    for bio_key in BIOGRAPHICAL_CATEGORY_KEYS:
-                        if bio_key in fine_tuned_bio_data and fine_tuned_bio_data[bio_key]: # Check if list is not empty
-                            has_any_bio_detail_displayed = True
-                            display_key_name = bio_key.replace("_", " ").title()
-                            st.markdown(f"**{display_key_name}:**")
-                            for item_quote in fine_tuned_bio_data[bio_key]:
-                                st.markdown(f"- *\"{item_quote}\"*")
-                    if not has_any_bio_detail_displayed:
-                        st.caption("(No specific biographical details extracted by the fine-tuned model for the defined categories in this chunk.)")
-
-# === Satsang Data Explorer UI ===
-st.markdown("---")
-st.header("🔬 Satsang Data Explorer")
-st.info("Use this section to inspect the processed data for a specific transcript. Select a transcript from the dropdown to view its chunks and the associated tags and categories.")
-
-# Function to fetch all chunks for a given transcript name, with caching
-@st.cache_data(ttl=600)
-def get_chunks_for_transcript(transcript_name: str) -> list:
-    """Fetches all points (chunks) for a specific transcript from Qdrant."""
-    if not qdrant_client or not transcript_name:
-        return []
-    
-    logger.info(f"Fetching all chunks from Qdrant for transcript: '{transcript_name}'")
-    all_points = []
-    try:
-        offset_val = None
-        while True:
-            points_batch, next_offset_val = qdrant_client.scroll(
-                collection_name=COLLECTION_NAME,
-                scroll_filter=models.Filter(must=[
-                    models.FieldCondition(key="transcript_name", match=models.MatchValue(value=transcript_name))
-                ]),
-                limit=100, # Fetch in batches of 100
-                offset=offset_val,
-                with_payload=True,
-                with_vectors=False
-            )
-            if points_batch:
-                all_points.extend(points_batch)
-            
-            if not next_offset_val:
-                break # No more pages
-            offset_val = next_offset_val
-            
-        logger.info(f"Retrieved {len(all_points)} chunks for '{transcript_name}'.")
-        # Sort by timestamp to ensure chronological order
-        all_points.sort(key=lambda p: p.payload.get('timestamp', '0:0:0.0'))
-        return all_points
-    except Exception as e:
-        st.error(f"Failed to fetch chunks for '{transcript_name}': {e}")
-        logger.error(f"Error in get_chunks_for_transcript for '{transcript_name}': {e}", exc_info=True)
-        return []
-
-# Dropdown to select the transcript to inspect
-processed_transcript_list_for_explorer = get_processed_transcripts()
-if processed_transcript_list_for_explorer:
-    selected_transcript_to_inspect = st.selectbox(
-        "Select a transcript to inspect:",
-        options=[""] + processed_transcript_list_for_explorer,
-        index=0,
-        key="transcript_inspector_selectbox"
+    # Simple location selection from glossary
+    location_input = st.selectbox(
+        "Location",
+        options=[""] + sorted(LOCATIONS),
+        key="location_select",
+        help="Select location from predefined list"
     )
 
-    if selected_transcript_to_inspect:
-        with st.spinner(f"Loading all chunks for '{selected_transcript_to_inspect}'..."):
-            transcript_chunks = get_chunks_for_transcript(selected_transcript_to_inspect)
+    # Optional: Add new location through expander
+    with st.expander("➕ Add New Location"):
+        new_location = st.text_input("New Location Name")
+        if st.button("Add Location"):
+            if new_location and new_location not in LOCATIONS:
+                LOCATIONS.append(new_location)
+                st.success(f"Added {new_location} to locations list")
+                st.experimental_rerun()
+            elif new_location in LOCATIONS:
+                st.warning("Location already exists")
+            else:
+                st.error("Please enter a location name")
 
-        if not transcript_chunks:
-            st.warning("No chunks found for this transcript, or an error occurred during fetching.")
-        else:
-            st.success(f"Loaded {len(transcript_chunks)} chunks. Expand any chunk to see details.")
+    # Speaker selection from predefined list
+    speaker_input = st.selectbox(
+        "Speaker",
+        options=[""] + sorted(SPEAKERS),
+        key="speaker_select",
+        help="Select speaker from predefined list"
+    )
+
+    # Optional: Add new speaker through expander
+    with st.expander("➕ Add New Speaker"):
+        new_speaker = st.text_input("New Speaker Name")
+        if st.button("Add Speaker"):
+            if new_speaker and new_speaker not in SPEAKERS:
+                SPEAKERS.append(new_speaker)
+                st.success(f"Added {new_speaker} to speakers list")
+                st.experimental_rerun()
+            elif new_speaker in SPEAKERS:
+                st.warning("Speaker already exists")
+            else:
+                st.error("Please enter a speaker name")
+
+    # Satsang name and misc tag
+    satsang_name = st.text_input(
+        "Satsang Name",
+        key="satsang_name_input"
+    )
+    misc_tag = st.text_input(
+        "Miscellaneous Tags",
+        key="misc_tag_input",
+        help="Add any additional tags, separated by commas"
+    )
+
+    # Modify the transcript name construction
+    if uploaded_file:
+        default_transcript_name = (f"{transcript_date.strftime('%Y%m%d')}_{satsang_name}"
+                                 if satsang_name else Path(uploaded_file.name).stem)
+        
+        if 'current_transcript_name_input' not in st.session_state:
+            st.session_state.current_transcript_name_input = default_transcript_name
+
+    # Add processing button
+    process_button_clicked = st.button(
+        "Process Transcript",
+        disabled=not uploaded_file,  # Disable if no file uploaded
+        help="Click to process the uploaded transcript with metadata"
+    )
+
+# Add after file upload in sidebar
+chunking_col1, chunking_col2 = st.columns(2)
+with chunking_col1:
+    chunk_size_words_input = st.number_input(
+        "Words per Chunk",
+        min_value=50,
+        max_value=500,
+        value=200,
+        step=50,
+        help="Target number of words per chunk"
+    )
+with chunking_col2:
+    overlap_words_input = st.number_input(
+        "Overlap Words",
+        min_value=0,
+        max_value=100,
+        value=50,
+        step=10,
+        help="Number of words to overlap between chunks"
+    )
+
+# Modify the chunk processing to include metadata
+def process_chunks_with_metadata(chunks, metadata):
+    """Add metadata to each chunk before processing."""
+    processed_chunks = []
+    for chunk in chunks:
+        chunk_dict = {
+            'text': chunk['text'],
+            'timestamp': chunk['timestamp'],
+            'date': metadata['date'],
+            'category': metadata['category'],
+            'location': metadata['location'],
+            'speaker': metadata['speaker'],
+            'satsang_name': metadata['satsang_name'],
+            'misc_tags': metadata['misc_tags'],
+            'transcript_name': metadata['transcript_name']
+        }
+        processed_chunks.append(chunk_dict)
+    return processed_chunks
+
+# Modify the main processing section
+if process_button_clicked:
+    if not final_transcript_name_for_processing.strip():
+        st.error("Please provide a transcript name.")
+    else:
+        try:
+            # Create metadata dictionary
+            metadata = {
+                'date': transcript_date.strftime('%Y-%m-%d'),
+                'category': transcript_category,
+                'location': location_input,
+                'speaker': speaker_input,
+                'satsang_name': satsang_name,
+                'misc_tags': [tag.strip() for tag in misc_tag.split(',')] if misc_tag else [],
+                'transcript_name': final_transcript_name_for_processing
+            }
+
+            # Process SRT file
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.srt') as tmp_file:
+                tmp_file.write(uploaded_file.getvalue())
+                tmp_file_path = tmp_file.name
+
+            subs = parse_srt_file(tmp_file_path)
+            os.unlink(tmp_file_path)
+
+            if not subs:
+                st.error("No subtitles found in file.")
+                st.stop()
+
+            chunks = srt_to_chunks(subs, chunk_size_words_input, overlap_words_input)
+            if not chunks:
+                st.error("Chunking failed.")
+                st.stop()
+
+            # Add metadata to chunks
+            chunks_with_metadata = process_chunks_with_metadata(chunks, metadata)
             
-            for i, point in enumerate(transcript_chunks):
-                payload = point.payload
-                if not isinstance(payload, dict): continue
+            # Process the chunks with metadata
+            # Add your processing logic here
+            
+        except Exception as e:
+            st.error(f"Error processing transcript: {str(e)}")
+            logger.error(f"Transcript processing error: {e}", exc_info=True)
+# --- Main Area for Search Results OR Transcript Inspection ---
+# This part will now conditionally display either search results or inspected chunks
 
-                exp_title = f"Chunk {i+1}  |  Timestamp: {payload.get('timestamp', 'N/A')}"
-                with st.expander(exp_title):
-                    
-                    # --- Display Original Text ---
-                    st.markdown("**Full Text:**")
-                    st.markdown(f"> {payload.get('original_text', 'Error: Text missing')}")
-                    
-                    st.markdown("---")
-                    
-                    # --- Display Claude Entities ---
-                    st.subheader("🏷️ Claude Entity Tags")
-                    claude_entities = payload.get('entities')
-                    if claude_entities and isinstance(claude_entities, dict):
-                        st.json(claude_entities)
-                    else:
-                        st.caption("No Claude entity tags found for this chunk.")
-                        
-                    st.markdown("---")
+# Initialize/manage session state for what to display
+if 'transcript_to_display_chunks' not in st.session_state:
+    st.session_state.transcript_to_display_chunks = None
 
-                    # --- Display Fine-Tuned Model Categories ---
-                    st.subheader("🗂️ Fine-Tuned Model Categories")
-                    # Find all assigned categories by checking the 'has_' flags
-                    assigned_categories = [
-                        key.replace("_", " ").title() 
-                        for key in BIOGRAPHICAL_CATEGORY_KEYS 
-                        if payload.get(f"has_{key}") is True
-                    ]
-                    
-                    if assigned_categories:
-                        st.markdown("**Assigned Categories:**")
-                        for cat in assigned_categories:
-                            st.markdown(f"- {cat}")
-                    else:
-                        st.caption("No biographical categories were assigned by the fine-tuned model for this chunk.")
-                    
-                    # Also display the raw extracted quotes for verification
-                    fine_tuned_extractions = payload.get('biographical_extractions')
-                    if fine_tuned_extractions and isinstance(fine_tuned_extractions, dict):
-                        st.markdown("**Extracted Quotes (for verification):**")
-                        has_quotes = False
-                        for key, quotes in fine_tuned_extractions.items():
-                            if isinstance(quotes, list) and quotes:
-                                has_quotes = True
-                                st.markdown(f"- **{key.replace('_', ' ').title()}:**")
-                                for q in quotes:
-                                    st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;- _\"{q}\"_", unsafe_allow_html=True)
-                        if not has_quotes:
-                            st.caption("(No specific quotes were extracted.)")
-                    else:
-                        st.caption("No biographical extractions found for this chunk.")
+# If a transcript is selected for inspection, prioritize displaying that
+if st.session_state.transcript_to_display_chunks:
+    st.markdown("---")
+    st.header(f"🔬 Inspecting Chunks for: {st.session_state.transcript_to_display_chunks}")
+    
+    with st.spinner(f"Fetching all chunks for '{st.session_state.transcript_to_display_chunks}'..."):
+        all_chunks_data = get_all_chunks_for_transcript(st.session_state.transcript_to_display_chunks)
 
-    # --- Export Bio-Extracted Quotes to Excel ---
-    if selected_transcript_to_inspect:
-        export_rows = []
-        for point in transcript_chunks:
-            payload = point.payload
-            satsang_name = payload.get('transcript_name', '')
-            bio_extractions = payload.get('biographical_extractions', {})
-            if isinstance(bio_extractions, dict):
-                for category, quotes in bio_extractions.items():
-                    if isinstance(quotes, list) and quotes:
-                        for quote in quotes:
-                            export_rows.append({
-                                "Chunk": quote,
-                                "Satsang Name": satsang_name,
-                                "Category": category.replace("_", " ").title()
-                            })
-        if export_rows:
-            df = pd.DataFrame(export_rows)
-            output = BytesIO()
-            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                df.to_excel(writer, index=False, sheet_name='Bio Extractions')
-            st.download_button(
-                label="⬇️ Download Bio-Extracted Quotes (Excel)",
-                data=output.getvalue(),
-                file_name=f"{selected_transcript_to_inspect}_bio_extractions.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-        else:
-            st.info("No bio-extracted quotes found for this transcript.")
+    if not all_chunks_data:
+        st.info(f"No chunks found in Qdrant for '{st.session_state.transcript_to_display_chunks}' or an error occurred.")
+    else:
+        st.success(f"Found {len(all_chunks_data)} chunks for '{st.session_state.transcript_to_display_chunks}'.")
+        for idx, chunk_info in enumerate(all_chunks_data):
+            with st.expander(f"Chunk {idx + 1} (ID: ...{chunk_info['id'][-12:]})", expanded=False):
+                st.markdown(f"**Timestamp:** {chunk_info['payload'].get('timestamp', 'N/A')}")
+                st.markdown("**Original Text:**")
+                st.markdown(f"> {chunk_info['payload'].get('original_text', 'N/A')}")
+                
+                entities = chunk_info['payload'].get('entities')
+                if entities is not None: # Check if entities key exists
+                    st.markdown("**Entities (Claude):**")
+                    if isinstance(entities, dict) and (entities.get('people') or entities.get('places') or 'self_references' in entities):
+                        if entities.get('people'):
+                            st.markdown(f"  - **People:** {', '.join(entities['people'])}")
+                        if entities.get('places'):
+                            st.markdown(f"  - **Places:** {', '.join(entities['places'])}")
+                        if 'self_references' in entities:
+                            sr_val_inspect = entities.get('self_references')
+                            sr_disp_inspect = "N/A"
+                            if isinstance(sr_val_inspect, bool): sr_disp_inspect = "Yes" if sr_val_inspect else "No"
+                            elif sr_val_inspect is not None: sr_disp_inspect = str(sr_val_inspect)
+                            st.markdown(f"  - **Self-ref:** {sr_disp_inspect}")
+                    elif isinstance(entities, dict) and not any(entities.values()): # Empty dict like {'people':[], ...}
+                        st.caption("  (Claude found no specific entities of interest for this chunk)")
+                    else: # Entities key exists but is not a dict or is an unexpected format
+                        st.caption(f"  (Entities data present but in unexpected format: {type(entities)})")
+                        st.json(entities) # Display raw if not dict
+                else:
+                    st.caption("  (No Claude entity tags present for this chunk)")
+
+                # Display other payload fields if any (excluding a few common ones already shown)
+                other_payload = {k: v for k, v in chunk_info['payload'].items() if k not in ['transcript_name', 'timestamp', 'original_text', 'entities']}
+                if other_payload:
+                    st.markdown("**Other Payload Data:**")
+                    st.json(other_payload)
+    
+    # Add a button to clear the inspection view and go back to search
+    if st.button("Clear Inspection (Back to Search)", key="clear_inspection_view_btn"):
+        st.session_state.transcript_to_display_chunks = None
+        st.rerun() # Rerun to update the main display area
+
+# Only show search UI if not inspecting chunks
+elif not st.session_state.transcript_to_display_chunks:
+    st.markdown("---")
+    st.header("🔍 Semantic Search & Analysis")
+    search_query_input = st.text_input("Enter your search query:", key="main_search_query_input")
+    col_opt1, col_opt2, col_opt3 = st.columns(3)
+    with col_opt1: use_llm_reranking = st.checkbox("Enable LLM Reranking", value=True, key="rerank_toggle_checkbox", help=f"Uses {RERANK_MODEL}")
+    with col_opt2: do_pinpoint_answer_extraction = st.checkbox("Pinpoint Answer Snippet", value=True, key="pinpoint_answer_checkbox", help=f"Uses {ANSWER_EXTRACTION_MODEL}")
+    with col_opt3: initial_search_results_limit = st.slider("Initial results:", 3, 30, 5, key="search_results_limit_slider")
+    custom_reranking_instructions_input = ""
+    if use_llm_reranking: custom_reranking_instructions_input = st.text_area("Custom Reranking Instructions (Optional):", placeholder="e.g., 'Prioritize practical advice.'", key="custom_rerank_instructions_input_area", height=100)
+
+    if search_query_input:
+        with st.spinner("Searching and analyzing..."):
+            # 1. Get Query Embedding
+            try: query_vector = client.embeddings.create(model=EMBEDDING_MODEL, input=[search_query_input]).data[0].embedding
+            except Exception as e: st.error(f"Query embed fail: {e}"); logger.error(f"Query embed error: {e}"); st.stop()
+            # 2. Search Qdrant
+            try:
+                qdrant_hits = qdrant_client.search(COLLECTION_NAME, query_vector, limit=initial_search_results_limit, with_payload=True)
+            except Exception as e: st.error(f"Qdrant search fail: {e}"); logger.error(f"Qdrant search error: {e}"); st.stop()
+            retrieved_payloads = [h.payload for h in qdrant_hits if h.payload]
+            if not retrieved_payloads: st.info("No results found."); st.stop()
+
+            # 3. Reranking
+            if use_llm_reranking and len(retrieved_payloads) > 1:
+                with st.spinner(f"Reranking with {RERANK_MODEL}..."):
+                    excerpts_for_llm_rerank = [f"[{i+1}] {rp.get('original_text', 'N/A')}" for i, rp in enumerate(retrieved_payloads)]
+                    instr_prefix = "Rerank by relevance to query."
+                    if custom_reranking_instructions_input: instr_prefix += f" Criteria: {custom_reranking_instructions_input}."
+                    prompt = (f"{instr_prefix}\nQuery: \"{search_query_input}\"\nExcerpts:\n{chr(10).join(excerpts_for_llm_rerank)}\nReturn only comma-separated original indices reranked.")
+                    try:
+                        resp = client.chat.completions.create(model=RERANK_MODEL, messages=[{"role":"system", "content":"You rerank results."}, {"role":"user", "content":prompt}], max_tokens=200, temperature=0.0)
+                        indices_str = resp.choices[0].message.content.strip()
+                        parsed_indices = []; seen = set()
+                        for s_idx in re.findall(r'\d+', indices_str):
+                            val = int(s_idx) - 1
+                            if 0 <= val < len(retrieved_payloads) and val not in seen: parsed_indices.append(val); seen.add(val)
+                        if parsed_indices:
+                            final_order = parsed_indices + [i for i in range(len(retrieved_payloads)) if i not in seen]
+                            retrieved_payloads = [retrieved_payloads[i] for i in final_order]
+                            st.caption(f"ℹ️ Results reranked by {RERANK_MODEL}.")
+                        else: st.warning("Reranking failed/no change. Original order.", icon="⚠️")
+                    except Exception as e_rr: st.warning(f"Reranking error: {e_rr}. Original order.", icon="⚠️"); logger.error(f"Reranking error: {e_rr}")
+            
+            # 4. Display Results
+            st.subheader(f"Search Results for: \"search_query_input\"")
+            for i, payload_data in enumerate(retrieved_payloads, 1):
+                if not isinstance(payload_data, dict): continue 
+                full_text = payload_data.get('original_text', 'Error: Text missing')
+                exp_title = f"Result {i} @ {payload_data.get('timestamp','N/A')} | Transcript: {payload_data.get('transcript_name','N/A')}"
+                with st.expander(exp_title, expanded=(i==1)):
+                    if do_pinpoint_answer_extraction and full_text != 'Error: Text missing':
+                        with st.spinner(f"Pinpointing answer for result {i}..."):
+                            answer_span = extract_answer_span(search_query_input, full_text, ANSWER_EXTRACTION_MODEL)
+                        if answer_span and answer_span.strip() and answer_span.strip().lower() != full_text.strip().lower() and len(answer_span.strip()) < len(full_text.strip()):
+                            st.markdown(f"🎯 **Pinpointed Answer Snippet:**\n> *{answer_span.strip()}*"); st.markdown("--- \n**Full Context Chunk:**")
+                        elif answer_span and answer_span.strip().lower() == full_text.strip().lower(): st.caption(f"(Full chunk identified as most direct answer)")
+                    st.markdown(full_text)
+                    entities_payload = payload_data.get('entities') 
+                    # Debugging: st.write(f"DEBUG search - entities_payload for result {i}: {entities_payload}")
+                    if entities_payload and isinstance(entities_payload, dict):
+                        entity_parts_disp = []
+                        if entities_payload.get('people'): entity_parts_disp.append(f"**People:** {', '.join(entities_payload['people'])}")
+                        if entities_payload.get('places'): entity_parts_disp.append(f"**Places:** {', '.join(entities_payload['places'])}")
+                        if 'self_references' in entities_payload: 
+                            sr_val = entities_payload.get('self_references')
+                            sr_disp = "N/A"
+                            if isinstance(sr_val, bool): sr_disp = "Yes" if sr_val else "No"
+                            elif sr_val is not None: sr_disp = str(sr_val)
+                            entity_parts_disp.append(f"**Self-ref:** {sr_disp}")
+                        if entity_parts_disp: st.markdown("---"); st.markdown(" ".join(entity_parts_disp), unsafe_allow_html=True)
+                    # else:
+                        # st.caption("(No entity tags found for this chunk in search result)") # Optional debug
+
+# Add after metadata inputs
+st.markdown("---")
+st.subheader("📊 Post-Processing")
+
+post_process_col1, post_process_col2 = st.columns(2)
+with post_process_col1:
+    transcript_to_tag = st.selectbox(
+        "Select Transcript for Entity Tagging",
+        options=[None] + [highlight_transcript(name, claude_done) for name in processed_transcript_list],
+        format_func=lambda x: "Select transcript..." if x is None else x
+    )
+    if transcript_to_tag and st.button("Run Entity Tagging"):
+        tag_transcript_entities_post_processing(transcript_to_tag.replace("✅ ", ""))
+
+with post_process_col2:
+    transcript_for_bio = st.selectbox(
+        "Select Transcript for Bio-Extraction",
+        options=[None] + [highlight_transcript(name, bio_done) for name in processed_transcript_list],
+        format_func=lambda x: "Select transcript..." if x is None else x
+    )
+    if transcript_for_bio and st.button("Run Bio-Extraction"):
+        extract_and_store_biographical_info(transcript_for_bio.replace("✅ ", ""), FINE_TUNED_BIO_MODEL_ID)
+
+# Add after post-processing section
+st.markdown("---")
+st.subheader("📜 Transcript Management")
+
+inspect_transcript = st.selectbox(
+    "Select Transcript to Inspect",
+    options=[None] + processed_transcript_list,
+    format_func=lambda x: "Select transcript..." if x is None else x,
+    key="inspect_transcript_select"
+)
+
+if inspect_transcript and st.button("Inspect Chunks"):
+    st.session_state.transcript_to_display_chunks = inspect_transcript
+    st.experimental_rerun()
+
